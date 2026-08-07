@@ -102,10 +102,20 @@ export async function registerAuthRoutes(server: FastifyInstance): Promise<void>
 
     let subject: string
     try {
-      const claims = await verifyToken(token, { secretKey: config.clerk.secretKey })
+      const verifyOpts: Record<string, string> = { secretKey: config.clerk.secretKey }
+      if (config.clerk.publishableKey) verifyOpts.publishableKey = config.clerk.publishableKey
+      const claims = await verifyToken(token, verifyOpts)
       subject = claims.sub
     } catch (err: any) {
-      logger.warn({ error: err.message }, 'clerk token verification failed')
+      logger.warn({
+        error: err.message,
+        fullMessage: err.fullMessage,
+        reason: err.reason,
+        action: err.action,
+        status: err.status,
+        errors: err.errors,
+        cause: err.cause?.message,
+      }, 'clerk token verification failed')
       return reply.status(401).send({ error: 'Invalid or expired Clerk session' })
     }
 

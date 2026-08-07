@@ -16,10 +16,7 @@ const rootEl = document.getElementById("root");
 if (rootEl) {
   ReactDOM.createRoot(rootEl).render(
     <React.StrictMode>
-      <ClerkProvider
-        publishableKey={clerkPublishableKey}
-        afterSignInUrl="/dashboard"
-        afterSignUpUrl="/packages">
+      <ClerkProvider publishableKey={clerkPublishableKey}>
         <App />
       </ClerkProvider>
     </React.StrictMode>

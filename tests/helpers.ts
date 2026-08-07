@@ -1,7 +1,41 @@
-import { getPost } from '../src/store.js'
+import { getPost, createUser, createPackage, getPackage, connectAccount } from '../src/store.js'
 import type { Post } from '../src/types.js'
 
 export const PHONE = '919999999999'
+
+// Register the test user so checkUserAccess (which rejects unregistered senders) allows the webhook flow.
+// resetStore() clears packages too, so (re)create the referenced package with all publish features.
+export async function registerTestUser(opts: { tokens?: number; packageId?: string } = {}): Promise<void> {
+  const packageId = opts.packageId || 'pro'
+  const existing = await getPackage(packageId)
+  if (!existing) {
+    await createPackage({
+      name: 'Pro',
+      slug: packageId,
+      description: 'Test package',
+      priceCents: 100,
+      includedTokens: 1000,
+      features: {
+        facebook_publishing: true,
+        instagram_publishing: true,
+        voice_transcription: true,
+        scheduled_publishing: true,
+        analytics_dashboard: true,
+        priority_support: true,
+        ad_campaigns: true,
+      },
+    })
+  }
+  await createUser({
+    phone: PHONE,
+    name: 'Test User',
+    email: 'test@example.com',
+    tokensRemaining: opts.tokens ?? 100,
+    packageId,
+  })
+  await connectAccount({ phone: PHONE, platform: 'instagram', accountId: '17841400000000000', accountName: 'Test IG', accessToken: 'mock-ig-token' })
+  await connectAccount({ phone: PHONE, platform: 'facebook', accountId: 'dev_fb_page', accountName: 'Test FB', accessToken: 'mock-fb-token' })
+}
 
 export const IMAGE_BUFFER = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])
 

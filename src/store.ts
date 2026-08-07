@@ -1,13 +1,13 @@
 import path from 'node:path'
 import fs from 'node:fs'
 import { randomUUID } from 'node:crypto'
-import { eq, desc, asc, and } from 'drizzle-orm'
+import { eq, desc, asc, and, sql } from 'drizzle-orm'
 import { getDb, getPool } from './db.js'
-import { posts, messages, conversations, postEdits, userPreferences, brandProfile, packages, users, tokenTransactions, socialAccounts, adminConfig, payments, userSessions } from './db/schema.js'
+import { posts, messages, conversations, postEdits, userPreferences, brandProfile, packages, users, tokenTransactions, socialAccounts, adminConfig, payments, userSessions, adCampaigns, aiProviders, aiUsageLogs, aiProviderCosts, metaConfig, supportTickets, auditLogs, webhookEvents, scheduledPosts } from './db/schema.js'
 import { logger } from './lib/logger.js'
 import { storageDir } from './storage.js'
 import { encryptSecret, decryptSecret } from './lib/crypto.js'
-import type { AdminConfig, BrandProfile, ConversationState, EditRecord, MessageRecord, MessageRole, MessageType, Package, Payment, Post, PostStage, SocialAccount, TokenTransaction, TokenTransactionType, User, UserPreferences } from './types.js'
+import type { AdCampaign, AdminConfig, AIProvider, AIProviderCategory, AIProviderInput, AIUsageLog, AICostConfig, BrandProfile, ConversationState, EditRecord, MessageRecord, MessageRole, MessageType, Package, Payment, Post, PostStage, SocialAccount, TokenTransaction, TokenTransactionType, User, UserPreferences } from './types.js'
 
 function postFromRow(row: typeof posts.$inferSelect): Post {
   const data = (row.data ?? {}) as Record<string, unknown>
@@ -117,6 +117,10 @@ export async function initStore(): Promise<void> {
       tokens_used INTEGER NOT NULL DEFAULT 0,
       stripe_customer_id TEXT,
       stripe_subscription_id TEXT,
+      password_hash TEXT,
+      oauth_provider TEXT,
+      oauth_id TEXT,
+      avatar_url TEXT,
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL
     );
@@ -181,6 +185,143 @@ export async function initStore(): Promise<void> {
       created_at TEXT NOT NULL,
       expires_at TEXT NOT NULL
     );
+
+    CREATE TABLE IF NOT EXISTS ad_campaigns (
+      id TEXT PRIMARY KEY,
+      phone TEXT NOT NULL,
+      post_id TEXT,
+      name TEXT NOT NULL,
+      objective TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'pending',
+      ad_content JSONB NOT NULL,
+      targeting JSONB NOT NULL,
+      budget_cents INTEGER NOT NULL,
+      campaign_id TEXT,
+      ad_set_id TEXT,
+      ad_id TEXT,
+      image_url TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_ad_campaigns_phone ON ad_campaigns(phone);
+    CREATE INDEX IF NOT EXISTS idx_ad_campaigns_status ON ad_campaigns(status);
+
+    CREATE TABLE IF NOT EXISTS ai_providers (
+      id TEXT PRIMARY KEY,
+      category TEXT NOT NULL,
+      provider TEXT NOT NULL,
+      display_name TEXT NOT NULL,
+      api_key TEXT,
+      base_url TEXT,
+      model TEXT,
+      config JSONB NOT NULL DEFAULT '{}',
+      is_active BOOLEAN NOT NULL DEFAULT false,
+      is_default BOOLEAN NOT NULL DEFAULT false,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_ai_providers_category ON ai_providers(category);
+    CREATE INDEX IF NOT EXISTS idx_ai_providers_active ON ai_providers(is_active);
+
+    CREATE TABLE IF NOT EXISTS ai_usage_logs (
+      id TEXT PRIMARY KEY,
+      phone TEXT,
+      provider_id TEXT NOT NULL,
+      category TEXT NOT NULL,
+      model TEXT,
+      feature TEXT,
+      tokens_input INTEGER NOT NULL DEFAULT 0,
+      tokens_output INTEGER NOT NULL DEFAULT 0,
+      estimated_cost_cents INTEGER NOT NULL DEFAULT 0,
+      duration_ms INTEGER NOT NULL DEFAULT 0,
+      success BOOLEAN NOT NULL DEFAULT true,
+      error TEXT,
+      created_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_ai_usage_provider ON ai_usage_logs(provider_id);
+    CREATE INDEX IF NOT EXISTS idx_ai_usage_category ON ai_usage_logs(category);
+    CREATE INDEX IF NOT EXISTS idx_ai_usage_created ON ai_usage_logs(created_at);
+    CREATE INDEX IF NOT EXISTS idx_ai_usage_phone ON ai_usage_logs(phone);
+
+    CREATE TABLE IF NOT EXISTS ai_provider_costs (
+      id TEXT PRIMARY KEY,
+      provider TEXT NOT NULL,
+      category TEXT NOT NULL,
+      cost_per_1m_input_tokens INTEGER NOT NULL DEFAULT 0,
+      cost_per_1m_output_tokens INTEGER NOT NULL DEFAULT 0,
+      cost_per_image INTEGER NOT NULL DEFAULT 0,
+      cost_per_audio_minute INTEGER NOT NULL DEFAULT 0,
+      updated_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_ai_costs_provider ON ai_provider_costs(provider);
+
+    CREATE TABLE IF NOT EXISTS meta_config (
+      id TEXT PRIMARY KEY,
+      category TEXT NOT NULL,
+      key TEXT NOT NULL,
+      value TEXT,
+      is_sensitive BOOLEAN NOT NULL DEFAULT false,
+      updated_at TEXT NOT NULL,
+      UNIQUE(category, key)
+    );
+    CREATE INDEX IF NOT EXISTS idx_meta_config_category ON meta_config(category);
+
+    CREATE TABLE IF NOT EXISTS support_tickets (
+      id TEXT PRIMARY KEY,
+      phone TEXT NOT NULL,
+      subject TEXT NOT NULL,
+      message TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'open',
+      priority TEXT NOT NULL DEFAULT 'normal',
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_support_phone ON support_tickets(phone);
+    CREATE INDEX IF NOT EXISTS idx_support_status ON support_tickets(status);
+
+    CREATE TABLE IF NOT EXISTS audit_logs (
+      id TEXT PRIMARY KEY,
+      actor TEXT NOT NULL,
+      actor_type TEXT NOT NULL DEFAULT 'user',
+      action TEXT NOT NULL,
+      target TEXT,
+      target_type TEXT,
+      details JSONB NOT NULL DEFAULT '{}',
+      ip TEXT,
+      created_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_audit_actor ON audit_logs(actor);
+    CREATE INDEX IF NOT EXISTS idx_audit_action ON audit_logs(action);
+    CREATE INDEX IF NOT EXISTS idx_audit_created ON audit_logs(created_at);
+
+    CREATE TABLE IF NOT EXISTS webhook_events (
+      id TEXT PRIMARY KEY,
+      source TEXT NOT NULL,
+      event_type TEXT NOT NULL,
+      payload JSONB NOT NULL DEFAULT '{}',
+      headers JSONB NOT NULL DEFAULT '{}',
+      status TEXT NOT NULL DEFAULT 'received',
+      response_code INTEGER,
+      error TEXT,
+      retry_count INTEGER NOT NULL DEFAULT 0,
+      created_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_webhook_source ON webhook_events(source);
+    CREATE INDEX IF NOT EXISTS idx_webhook_status ON webhook_events(status);
+    CREATE INDEX IF NOT EXISTS idx_webhook_created ON webhook_events(created_at);
+
+    CREATE TABLE IF NOT EXISTS scheduled_posts (
+      id TEXT PRIMARY KEY,
+      post_id TEXT NOT NULL,
+      phone TEXT NOT NULL,
+      publish_at TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'pending',
+      created_at TEXT NOT NULL,
+      processed_at TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_scheduled_posts_phone ON scheduled_posts(phone);
+    CREATE INDEX IF NOT EXISTS idx_scheduled_posts_status ON scheduled_posts(status);
+    CREATE INDEX IF NOT EXISTS idx_scheduled_posts_publish_at ON scheduled_posts(publish_at);
   `)
 
   // Safe migrations — add columns if missing
@@ -190,6 +331,9 @@ export async function initStore(): Promise<void> {
   await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS avatar_url TEXT`)
 
   await seedDefaultPackages()
+
+  await seedDefaultAIProviders()
+  await migrateMetaConfigFromEnv()
 
   const legacyFile = path.join(process.cwd(), 'data', 'posts.json')
   if (fs.existsSync(legacyFile)) {
@@ -239,6 +383,19 @@ export async function listPosts(): Promise<Post[]> {
 export async function listPostsByPhone(phone: string): Promise<Post[]> {
   const result = await getDb().select().from(posts)
     .where(eq(posts.phone, phone))
+    .orderBy(desc(posts.createdAt))
+  return result.map((row) => postFromRow(row))
+}
+
+// List posts for a user's canonical phone, also matching any connected WhatsApp
+// numbers (webhook posts are keyed by the real sender number).
+export async function listPostsForUser(phone: string): Promise<Post[]> {
+  const accounts = await getDb().select({ accountId: socialAccounts.accountId }).from(socialAccounts)
+    .where(and(eq(socialAccounts.phone, phone), eq(socialAccounts.platform, 'whatsapp')))
+  const numbers = [phone, ...accounts.map((a) => a.accountId)]
+  if (numbers.length === 1) return listPostsByPhone(phone)
+  const result = await getDb().select().from(posts)
+    .where(sql`${posts.phone} IN (${sql.join(numbers.map((n) => sql`${n}`), sql`, `)})`)
     .orderBy(desc(posts.createdAt))
   return result.map((row) => postFromRow(row))
 }
@@ -746,7 +903,30 @@ export async function getAccountByPlatform(phone: string, platform: 'instagram' 
 }
 
 export async function disconnectAccount(id: string): Promise<void> {
-  await getDb().delete(socialAccounts).where(eq(socialAccounts.id, id))
+  await getDb().update(socialAccounts).set({ status: 'disconnected' }).where(eq(socialAccounts.id, id))
+}
+
+// Resolve a WhatsApp sender number (webhook `from`) to the user's canonical phone.
+// A real number is stored as `social_accounts.accountId` (platform=whatsapp) for the
+// user whose canonical phone is `social_accounts.phone`. Users whose canonical phone IS
+// the real number (e.g. admin-created or tests) resolve to themselves directly.
+export async function resolveUserPhone(phone: string): Promise<string> {
+  const direct = await getUser(phone)
+  if (direct) return phone
+
+  const result = await getDb().select({ userPhone: socialAccounts.phone }).from(socialAccounts)
+    .where(and(eq(socialAccounts.platform, 'whatsapp'), eq(socialAccounts.accountId, phone)))
+    .limit(1)
+  if (result.length === 0) return phone
+  return result[0].userPhone
+}
+
+export async function getUserByWhatsAppNumber(waNumber: string): Promise<User | undefined> {
+  const result = await getDb().select({ userPhone: socialAccounts.phone }).from(socialAccounts)
+    .where(and(eq(socialAccounts.platform, 'whatsapp'), eq(socialAccounts.accountId, waNumber)))
+    .limit(1)
+  if (result.length === 0) return undefined
+  return getUser(result[0].userPhone)
 }
 
 // ---- Admin Config ----
@@ -858,6 +1038,11 @@ export async function updatePayment(id: string, patch: Partial<Payment>): Promis
   if (!existing) throw new Error(`Payment ${id} not found`)
   const updated: Payment = { ...existing, ...patch }
   await getDb().update(payments).set({
+    packageId: updated.packageId,
+    tokenCount: updated.tokenCount,
+    amountCents: updated.amountCents,
+    type: updated.type,
+    stripeSessionId: updated.stripeSessionId,
     status: updated.status,
   }).where(eq(payments.id, id))
   return updated
@@ -899,13 +1084,13 @@ export async function deleteUserSession(token: string): Promise<void> {
 
 const DEFAULT_PACKAGES = [
   { name: 'Facebook Only', slug: 'facebook-only', description: 'Perfect for Facebook-only creators', priceCents: 500, includedTokens: 15, sortOrder: 0,
-    features: { facebook_publishing: true, instagram_publishing: false, whatsapp_broadcasts: false, voice_transcription: true, scheduled_publishing: false, analytics_dashboard: false, priority_support: false }},
+    features: { facebook_publishing: true, instagram_publishing: false, voice_transcription: true, scheduled_publishing: false, analytics_dashboard: false, priority_support: false }},
   { name: 'Starter', slug: 'starter', description: 'Get started with social media automation', priceCents: 1500, includedTokens: 100, sortOrder: 1,
-    features: { facebook_publishing: true, instagram_publishing: true, whatsapp_broadcasts: false, voice_transcription: true, scheduled_publishing: false, analytics_dashboard: true, priority_support: false }},
+    features: { facebook_publishing: true, instagram_publishing: true, voice_transcription: true, scheduled_publishing: false, analytics_dashboard: true, priority_support: false }},
   { name: 'Pro', slug: 'pro', description: 'For professional content creators', priceCents: 2900, includedTokens: 1000, sortOrder: 2,
-    features: { facebook_publishing: true, instagram_publishing: true, whatsapp_broadcasts: true, voice_transcription: true, scheduled_publishing: true, analytics_dashboard: true, priority_support: true }},
+    features: { facebook_publishing: true, instagram_publishing: true, whatsapp_broadcast: true, voice_transcription: true, scheduled_publishing: true, analytics_dashboard: true, priority_support: true }},
   { name: 'Exclusive', slug: 'exclusive', description: 'Full access to all features', priceCents: 9900, includedTokens: 3000, sortOrder: 3,
-    features: { facebook_publishing: true, instagram_publishing: true, whatsapp_broadcasts: true, voice_transcription: true, scheduled_publishing: true, analytics_dashboard: true, priority_support: true, ad_campaigns: true, custom_branding: true }},
+    features: { facebook_publishing: true, instagram_publishing: true, whatsapp_broadcast: true, voice_transcription: true, scheduled_publishing: true, analytics_dashboard: true, priority_support: true, ad_campaigns: true, custom_branding: true }},
 ]
 
 async function seedDefaultPackages(): Promise<void> {
@@ -931,6 +1116,92 @@ async function seedDefaultPackages(): Promise<void> {
   logger.info({ count: DEFAULT_PACKAGES.length }, 'seeded default packages')
 }
 
+// ---- AI Provider Seeding (from env vars) ----
+
+async function seedDefaultAIProviders(): Promise<void> {
+  const existing = await getDb().select().from(aiProviders).limit(1)
+  if (existing.length > 0) return
+
+  const now = new Date().toISOString()
+  const defaults: AIProviderInput[] = []
+
+  // Groq STT
+  const groqKey = process.env.GROQ_API_KEY || ''
+  if (groqKey) {
+    defaults.push({
+      category: 'stt',
+      provider: 'groq',
+      displayName: 'Groq Whisper',
+      apiKey: groqKey,
+      baseUrl: process.env.GROQ_BASE_URL || 'https://api.groq.com/openai/v1',
+      model: process.env.GROQ_MODEL || 'whisper-large-v3',
+      config: {},
+      isActive: true,
+      isDefault: true,
+    })
+  }
+
+  // DeepSeek LLM
+  const llmKey = process.env.LLM_API_KEY || ''
+  const llmBase = process.env.LLM_BASE_URL || 'https://api.deepseek.com'
+  const llmModel = process.env.LLM_MODEL || 'deepseek-chat'
+  if (llmKey) {
+    const providerName = llmBase.includes('deepseek') ? 'deepseek'
+      : llmBase.includes('mistral') ? 'mistral'
+      : llmBase.includes('openai') ? 'openai'
+      : llmBase.includes('anthropic') ? 'anthropic'
+      : 'custom'
+    defaults.push({
+      category: 'llm',
+      provider: providerName,
+      displayName: providerName.charAt(0).toUpperCase() + providerName.slice(1),
+      apiKey: llmKey,
+      baseUrl: llmBase,
+      model: llmModel,
+      config: {},
+      isActive: true,
+      isDefault: true,
+    })
+  }
+
+  // OpenAI Image
+  const openaiKey = process.env.OPENAI_API_KEY || ''
+  if (openaiKey) {
+    defaults.push({
+      category: 'image',
+      provider: 'openai',
+      displayName: 'OpenAI GPT Image',
+      apiKey: openaiKey,
+      baseUrl: 'https://api.openai.com/v1',
+      model: process.env.IMAGE_MODEL || 'gpt-image-1-mini',
+      config: {},
+      isActive: true,
+      isDefault: true,
+    })
+  }
+
+  for (const d of defaults) {
+    await getDb().insert(aiProviders).values({
+      id: randomUUID(),
+      category: d.category,
+      provider: d.provider,
+      displayName: d.displayName,
+      apiKey: d.apiKey,
+      baseUrl: d.baseUrl,
+      model: d.model,
+      config: d.config as Record<string, unknown>,
+      isActive: d.isActive,
+      isDefault: d.isDefault,
+      createdAt: now,
+      updatedAt: now,
+    })
+  }
+
+  if (defaults.length > 0) {
+    logger.info({ count: defaults.length }, 'seeded default AI providers from env vars')
+  }
+}
+
 // ---- Reset Store ----
 
 export async function resetStore(): Promise<void> {
@@ -948,6 +1219,13 @@ export async function resetStore(): Promise<void> {
   await pool.query('DELETE FROM admin_config')
   await pool.query('DELETE FROM payments')
   await pool.query('DELETE FROM user_sessions')
+  await pool.query('DELETE FROM ai_usage_logs')
+  await pool.query('DELETE FROM ai_provider_costs')
+  await pool.query('DELETE FROM ai_providers')
+  await pool.query('DELETE FROM meta_config')
+  await pool.query('DELETE FROM support_tickets')
+  await pool.query('DELETE FROM webhook_events')
+  await pool.query('DELETE FROM scheduled_posts')
 }
 
 const STUCK_STATUSES = ['PREPARING_TO_PUBLISH', 'PUBLISHING'] as PostStage[]
@@ -984,4 +1262,578 @@ export async function recoverStuckPosts(): Promise<number> {
   return recovered
 }
 
+// ---- Ad Campaign CRUD ----
+
+function adCampaignFromRow(row: typeof adCampaigns.$inferSelect): AdCampaign {
+  return {
+    id: row.id,
+    phone: row.phone,
+    postId: row.postId || undefined,
+    name: row.name,
+    objective: row.objective,
+    status: row.status as AdCampaign['status'],
+    adContent: row.adContent as AdCampaign['adContent'],
+    targeting: row.targeting as AdCampaign['targeting'],
+    budgetCents: row.budgetCents,
+    campaignId: row.campaignId || undefined,
+    adSetId: row.adSetId || undefined,
+    adId: row.adId || undefined,
+    imageUrl: row.imageUrl || undefined,
+    createdAt: row.createdAt,
+    updatedAt: row.updatedAt,
+  }
+}
+
+export async function createAdCampaign(data: {
+  phone: string
+  postId?: string
+  name: string
+  objective: string
+  adContent: AdCampaign['adContent']
+  targeting: AdCampaign['targeting']
+  budgetCents: number
+  imageUrl?: string
+}): Promise<AdCampaign> {
+  const now = new Date().toISOString()
+  const campaign: AdCampaign = {
+    id: randomUUID(),
+    phone: data.phone,
+    postId: data.postId,
+    name: data.name,
+    objective: data.objective,
+    status: 'pending',
+    adContent: data.adContent,
+    targeting: data.targeting,
+    budgetCents: data.budgetCents,
+    imageUrl: data.imageUrl,
+    createdAt: now,
+    updatedAt: now,
+  }
+  await getDb().insert(adCampaigns).values({
+    id: campaign.id,
+    phone: campaign.phone,
+    postId: campaign.postId || null,
+    name: campaign.name,
+    objective: campaign.objective,
+    status: campaign.status,
+    adContent: campaign.adContent as unknown as Record<string, unknown>,
+    targeting: campaign.targeting as unknown as Record<string, unknown>,
+    budgetCents: campaign.budgetCents,
+    imageUrl: campaign.imageUrl || null,
+    createdAt: campaign.createdAt,
+    updatedAt: campaign.updatedAt,
+  })
+  return campaign
+}
+
+export async function getAdCampaign(id: string): Promise<AdCampaign | undefined> {
+  const result = await getDb().select().from(adCampaigns).where(eq(adCampaigns.id, id)).limit(1)
+  if (result.length === 0) return undefined
+  return adCampaignFromRow(result[0])
+}
+
+export async function listAdCampaignsByPhone(phone: string): Promise<AdCampaign[]> {
+  const result = await getDb().select().from(adCampaigns)
+    .where(eq(adCampaigns.phone, phone))
+    .orderBy(desc(adCampaigns.createdAt))
+  return result.map(adCampaignFromRow)
+}
+
+export async function updateAdCampaign(id: string, patch: Partial<AdCampaign>): Promise<AdCampaign> {
+  const existing = await getAdCampaign(id)
+  if (!existing) throw new Error(`Ad campaign ${id} not found`)
+  const updated: AdCampaign = { ...existing, ...patch, updatedAt: new Date().toISOString() }
+  await getDb().update(adCampaigns).set({
+    status: updated.status,
+    campaignId: updated.campaignId || null,
+    adSetId: updated.adSetId || null,
+    adId: updated.adId || null,
+    imageUrl: updated.imageUrl || null,
+    updatedAt: updated.updatedAt,
+  }).where(eq(adCampaigns.id, id))
+  return updated
+}
+
+// ---- AI Provider CRUD ----
+
+function aiProviderFromRow(row: typeof aiProviders.$inferSelect): AIProvider {
+  return {
+    id: row.id,
+    category: row.category as AIProviderCategory,
+    provider: row.provider,
+    displayName: row.displayName,
+    apiKey: row.apiKey || '',
+    baseUrl: row.baseUrl || '',
+    model: row.model || '',
+    config: (row.config ?? {}) as Record<string, unknown>,
+    isActive: row.isActive,
+    isDefault: row.isDefault,
+    createdAt: row.createdAt,
+    updatedAt: row.updatedAt,
+  }
+}
+
+export async function createAIProvider(data: AIProviderInput): Promise<AIProvider> {
+  const now = new Date().toISOString()
+  const id = randomUUID()
+  await getDb().insert(aiProviders).values({
+    id,
+    category: data.category,
+    provider: data.provider,
+    displayName: data.displayName,
+    apiKey: data.apiKey,
+    baseUrl: data.baseUrl,
+    model: data.model,
+    config: data.config as Record<string, unknown>,
+    isActive: data.isActive,
+    isDefault: data.isDefault,
+    createdAt: now,
+    updatedAt: now,
+  })
+  return { id, ...data, createdAt: now, updatedAt: now }
+}
+
+export async function getAIProvider(id: string): Promise<AIProvider | undefined> {
+  const result = await getDb().select().from(aiProviders).where(eq(aiProviders.id, id)).limit(1)
+  if (result.length === 0) return undefined
+  return aiProviderFromRow(result[0])
+}
+
+export async function listAIProviders(category?: AIProviderCategory): Promise<AIProvider[]> {
+  let query
+  if (category) {
+    query = getDb().select().from(aiProviders).where(eq(aiProviders.category, category))
+  } else {
+    query = getDb().select().from(aiProviders)
+  }
+  const result = await query.orderBy(aiProviders.category, aiProviders.displayName)
+  return result.map(aiProviderFromRow)
+}
+
+export async function updateAIProvider(id: string, patch: Partial<AIProviderInput>): Promise<AIProvider> {
+  const existing = await getAIProvider(id)
+  if (!existing) throw new Error(`AI provider ${id} not found`)
+  const updated = { ...existing, ...patch, updatedAt: new Date().toISOString() }
+  await getDb().update(aiProviders).set({
+    category: updated.category,
+    provider: updated.provider,
+    displayName: updated.displayName,
+    apiKey: updated.apiKey,
+    baseUrl: updated.baseUrl,
+    model: updated.model,
+    config: updated.config as Record<string, unknown>,
+    isActive: updated.isActive,
+    isDefault: updated.isDefault,
+    updatedAt: updated.updatedAt,
+  }).where(eq(aiProviders.id, id))
+  return updated
+}
+
+export async function deleteAIProvider(id: string): Promise<void> {
+  await getDb().delete(aiProviders).where(eq(aiProviders.id, id))
+}
+
+export async function setActiveAIProvider(id: string, category: AIProviderCategory): Promise<void> {
+  const provider = await getAIProvider(id)
+  if (!provider) throw new Error(`AI provider ${id} not found`)
+  await getDb().update(aiProviders).set({ isActive: false })
+    .where(eq(aiProviders.category, category))
+  await getDb().update(aiProviders).set({ isActive: true, updatedAt: new Date().toISOString() })
+    .where(eq(aiProviders.id, id))
+}
+
+export async function getActiveAIProvider(category: AIProviderCategory): Promise<AIProvider | undefined> {
+  const result = await getDb().select().from(aiProviders)
+    .where(and(eq(aiProviders.category, category), eq(aiProviders.isActive, true)))
+    .limit(1)
+  if (result.length === 0) return undefined
+  return aiProviderFromRow(result[0])
+}
+
+// ---- AI Usage Logs ----
+
+function aiUsageLogFromRow(row: typeof aiUsageLogs.$inferSelect): AIUsageLog {
+  return {
+    id: row.id,
+    phone: row.phone || '',
+    providerId: row.providerId,
+    category: row.category as AIProviderCategory,
+    model: row.model || '',
+    feature: row.feature || '',
+    tokensInput: row.tokensInput,
+    tokensOutput: row.tokensOutput,
+    estimatedCostCents: row.estimatedCostCents,
+    durationMs: row.durationMs,
+    success: row.success,
+    error: row.error || '',
+    createdAt: row.createdAt,
+  }
+}
+
+export async function logAIUsage(data: Omit<AIUsageLog, 'id' | 'createdAt'>): Promise<AIUsageLog> {
+  const now = new Date().toISOString()
+  const id = randomUUID()
+  await getDb().insert(aiUsageLogs).values({
+    id,
+    phone: data.phone || null,
+    providerId: data.providerId,
+    category: data.category,
+    model: data.model || null,
+    feature: data.feature || null,
+    tokensInput: data.tokensInput,
+    tokensOutput: data.tokensOutput,
+    estimatedCostCents: data.estimatedCostCents,
+    durationMs: data.durationMs,
+    success: data.success,
+    error: data.error || null,
+    createdAt: now,
+  })
+  return { id, ...data, createdAt: now }
+}
+
+export async function getAIUsageStats(opts: { from?: string; to?: string; category?: AIProviderCategory; providerId?: string } = {}): Promise<{
+  totalRequests: number
+  totalTokensInput: number
+  totalTokensOutput: number
+  totalCostCents: number
+  byCategory: Record<string, { requests: number; costCents: number }>
+  byProvider: Record<string, { requests: number; costCents: number }>
+}> {
+  const conditions = []
+  if (opts.from) conditions.push(sql`${aiUsageLogs.createdAt} >= ${opts.from}`)
+  if (opts.to) conditions.push(sql`${aiUsageLogs.createdAt} <= ${opts.to}`)
+  if (opts.category) conditions.push(eq(aiUsageLogs.category, opts.category))
+  if (opts.providerId) conditions.push(eq(aiUsageLogs.providerId, opts.providerId))
+
+  const where = conditions.length > 0 ? and(...conditions) : undefined
+
+  const result = await getDb().select().from(aiUsageLogs).where(where)
+
+  const byCategory: Record<string, { requests: number; costCents: number }> = {}
+  const byProvider: Record<string, { requests: number; costCents: number }> = {}
+
+  let totalRequests = 0
+  let totalTokensInput = 0
+  let totalTokensOutput = 0
+  let totalCostCents = 0
+
+  for (const row of result) {
+    totalRequests++
+    totalTokensInput += row.tokensInput
+    totalTokensOutput += row.tokensOutput
+    totalCostCents += row.estimatedCostCents
+
+    if (!byCategory[row.category]) byCategory[row.category] = { requests: 0, costCents: 0 }
+    byCategory[row.category].requests++
+    byCategory[row.category].costCents += row.estimatedCostCents
+
+    if (!byProvider[row.providerId]) byProvider[row.providerId] = { requests: 0, costCents: 0 }
+    byProvider[row.providerId].requests++
+    byProvider[row.providerId].costCents += row.estimatedCostCents
+  }
+
+  return { totalRequests, totalTokensInput, totalTokensOutput, totalCostCents, byCategory, byProvider }
+}
+
+export async function listAIUsageLogs(opts: { limit?: number; offset?: number; phone?: string; providerId?: string; category?: AIProviderCategory } = {}): Promise<AIUsageLog[]> {
+  const conditions = []
+  if (opts.phone) conditions.push(eq(aiUsageLogs.phone, opts.phone))
+  if (opts.providerId) conditions.push(eq(aiUsageLogs.providerId, opts.providerId))
+  if (opts.category) conditions.push(eq(aiUsageLogs.category, opts.category))
+
+  const where = conditions.length > 0 ? and(...conditions) : undefined
+  const limit = opts.limit || 50
+  const offset = opts.offset || 0
+
+  const result = await getDb().select().from(aiUsageLogs)
+    .where(where)
+    .orderBy(desc(aiUsageLogs.createdAt))
+    .limit(limit)
+    .offset(offset)
+
+  return result.map(aiUsageLogFromRow)
+}
+
+// ---- AI Cost Config ----
+
+function aiCostFromRow(row: typeof aiProviderCosts.$inferSelect): AICostConfig {
+  return {
+    id: row.id,
+    provider: row.provider,
+    category: row.category as AIProviderCategory,
+    costPer1MInputTokens: row.costPer1MInputTokens,
+    costPer1MOutputTokens: row.costPer1MOutputTokens,
+    costPerImage: row.costPerImage,
+    costPerAudioMinute: row.costPerAudioMinute,
+    updatedAt: row.updatedAt,
+  }
+}
+
+export async function listAICosts(): Promise<AICostConfig[]> {
+  const result = await getDb().select().from(aiProviderCosts).orderBy(aiProviderCosts.provider)
+  return result.map(aiCostFromRow)
+}
+
+export async function upsertAICost(data: { provider: string; category: AIProviderCategory; costPer1MInputTokens?: number; costPer1MOutputTokens?: number; costPerImage?: number; costPerAudioMinute?: number }): Promise<AICostConfig> {
+  const now = new Date().toISOString()
+  const existing = await getDb().select().from(aiProviderCosts)
+    .where(and(eq(aiProviderCosts.provider, data.provider), eq(aiProviderCosts.category, data.category)))
+    .limit(1)
+
+  if (existing.length > 0) {
+    const row = existing[0]
+    await getDb().update(aiProviderCosts).set({
+      costPer1MInputTokens: data.costPer1MInputTokens ?? row.costPer1MInputTokens,
+      costPer1MOutputTokens: data.costPer1MOutputTokens ?? row.costPer1MOutputTokens,
+      costPerImage: data.costPerImage ?? row.costPerImage,
+      costPerAudioMinute: data.costPerAudioMinute ?? row.costPerAudioMinute,
+      updatedAt: now,
+    }).where(eq(aiProviderCosts.id, row.id))
+    return aiCostFromRow({ ...row, ...data, updatedAt: now })
+  }
+
+  const id = randomUUID()
+  await getDb().insert(aiProviderCosts).values({
+    id,
+    provider: data.provider,
+    category: data.category,
+    costPer1MInputTokens: data.costPer1MInputTokens || 0,
+    costPer1MOutputTokens: data.costPer1MOutputTokens || 0,
+    costPerImage: data.costPerImage || 0,
+    costPerAudioMinute: data.costPerAudioMinute || 0,
+    updatedAt: now,
+  })
+  return { id, provider: data.provider, category: data.category, costPer1MInputTokens: data.costPer1MInputTokens || 0, costPer1MOutputTokens: data.costPer1MOutputTokens || 0, costPerImage: data.costPerImage || 0, costPerAudioMinute: data.costPerAudioMinute || 0, updatedAt: now }
+}
+
+export async function getAICost(provider: string, category: AIProviderCategory): Promise<AICostConfig | undefined> {
+  const result = await getDb().select().from(aiProviderCosts)
+    .where(and(eq(aiProviderCosts.provider, provider), eq(aiProviderCosts.category, category)))
+    .limit(1)
+  if (result.length === 0) return undefined
+  return aiCostFromRow(result[0])
+}
+
+// ---- Meta Config ----
+
+interface MetaConfigEntry {
+  id: string;
+  category: string;
+  key: string;
+  value: string;
+  isSensitive: boolean;
+  updatedAt: string;
+}
+
+export async function getMetaConfig(category?: string): Promise<MetaConfigEntry[]> {
+  let query
+  if (category) {
+    query = getDb().select().from(metaConfig).where(eq(metaConfig.category, category))
+  } else {
+    query = getDb().select().from(metaConfig)
+  }
+  const result = await query
+  return result.map((r) => ({
+    id: r.id,
+    category: r.category,
+    key: r.key,
+    value: r.value || '',
+    isSensitive: r.isSensitive,
+    updatedAt: r.updatedAt,
+  }))
+}
+
+export async function getMetaConfigValue(category: string, key: string): Promise<string | undefined> {
+  const result = await getDb().select().from(metaConfig)
+    .where(and(eq(metaConfig.category, category), eq(metaConfig.key, key)))
+    .limit(1)
+  if (result.length === 0) return undefined
+  const value = result[0].value
+  if (!value) return undefined
+  if (result[0].isSensitive) {
+    return decryptSecret(value)
+  }
+  return value
+}
+
+export async function setMetaConfig(category: string, key: string, value: string, isSensitive = false): Promise<void> {
+  const now = new Date().toISOString()
+  const stored = isSensitive && value ? await encryptSecret(value) : value
+
+  const existing = await getDb().select().from(metaConfig)
+    .where(and(eq(metaConfig.category, category), eq(metaConfig.key, key)))
+    .limit(1)
+
+  if (existing.length > 0) {
+    await getDb().update(metaConfig).set({
+      value: stored,
+      isSensitive,
+      updatedAt: now,
+    }).where(eq(metaConfig.id, existing[0].id))
+  } else {
+    await getDb().insert(metaConfig).values({
+      id: randomUUID(),
+      category,
+      key,
+      value: stored,
+      isSensitive,
+      updatedAt: now,
+    })
+  }
+}
+
+export async function deleteMetaConfig(category: string, key: string): Promise<void> {
+  await getDb().delete(metaConfig)
+    .where(and(eq(metaConfig.category, category), eq(metaConfig.key, key)))
+}
+
+export async function getAllMetaConfig(): Promise<Record<string, Record<string, string>>> {
+  const result = await getDb().select().from(metaConfig)
+  const grouped: Record<string, Record<string, string>> = {}
+  for (const row of result) {
+    if (!grouped[row.category]) grouped[row.category] = {}
+    const value = row.value || ''
+    grouped[row.category][row.key] = row.isSensitive ? await decryptSecret(value) : value
+  }
+  return grouped
+}
+
+export async function migrateMetaConfigFromEnv(): Promise<void> {
+  const existing = await getMetaConfig()
+  if (existing.length > 0) return
+
+  const now = new Date().toISOString()
+  const migrations: Array<{ category: string; key: string; value: string; isSensitive: boolean }> = []
+
+  // General
+  if (process.env.FACEBOOK_APP_ID) migrations.push({ category: 'general', key: 'app_id', value: process.env.FACEBOOK_APP_ID, isSensitive: false })
+  if (process.env.FACEBOOK_APP_SECRET) migrations.push({ category: 'general', key: 'app_secret', value: process.env.FACEBOOK_APP_SECRET, isSensitive: true })
+  if (process.env.GRAPH_API_VERSION) migrations.push({ category: 'general', key: 'graph_api_version', value: process.env.GRAPH_API_VERSION, isSensitive: false })
+  if (process.env.META_APP_MODE) migrations.push({ category: 'general', key: 'app_mode', value: process.env.META_APP_MODE, isSensitive: false })
+
+  // OAuth
+  if (process.env.META_OAUTH_REDIRECT_URI) migrations.push({ category: 'oauth', key: 'redirect_uri', value: process.env.META_OAUTH_REDIRECT_URI, isSensitive: false })
+  if (process.env.META_CALLBACK_URI) migrations.push({ category: 'oauth', key: 'default_callback_uri', value: process.env.META_CALLBACK_URI, isSensitive: false })
+
+  // Webhook
+  if (process.env.WHATSAPP_VERIFY_TOKEN) migrations.push({ category: 'webhook', key: 'verify_token', value: process.env.WHATSAPP_VERIFY_TOKEN, isSensitive: true })
+  if (process.env.WHATSAPP_APP_SECRET) migrations.push({ category: 'webhook', key: 'webhook_secret', value: process.env.WHATSAPP_APP_SECRET, isSensitive: true })
+  if (process.env.META_WEBHOOK_URL) migrations.push({ category: 'webhook', key: 'webhook_url', value: process.env.META_WEBHOOK_URL, isSensitive: false })
+
+  // WhatsApp
+  if (process.env.WHATSAPP_TOKEN) migrations.push({ category: 'whatsapp', key: 'access_token', value: process.env.WHATSAPP_TOKEN, isSensitive: true })
+  if (process.env.WHATSAPP_PHONE_NUMBER_ID) migrations.push({ category: 'whatsapp', key: 'phone_number_id', value: process.env.WHATSAPP_PHONE_NUMBER_ID, isSensitive: false })
+  if (process.env.WHATSAPP_BUSINESS_ACCOUNT_ID) migrations.push({ category: 'whatsapp', key: 'business_account_id', value: process.env.WHATSAPP_BUSINESS_ACCOUNT_ID, isSensitive: false })
+
+  // API Versions
+  if (process.env.FACEBOOK_API_VERSION) migrations.push({ category: 'api_versions', key: 'facebook', value: process.env.FACEBOOK_API_VERSION, isSensitive: false })
+  if (process.env.INSTAGRAM_API_VERSION) migrations.push({ category: 'api_versions', key: 'instagram', value: process.env.INSTAGRAM_API_VERSION, isSensitive: false })
+  if (process.env.META_ADS_API_VERSION) migrations.push({ category: 'api_versions', key: 'meta_ads', value: process.env.META_ADS_API_VERSION, isSensitive: false })
+
+  for (const m of migrations) {
+    await getDb().insert(metaConfig).values({
+      id: randomUUID(),
+      category: m.category,
+      key: m.key,
+      value: m.isSensitive ? await encryptSecret(m.value) : m.value,
+      isSensitive: m.isSensitive,
+      updatedAt: now,
+    })
+  }
+
+  if (migrations.length > 0) {
+    logger.info({ count: migrations.length }, 'migrated meta_config from env vars')
+  }
+}
+
+// ---- Support Tickets ----
+
+function supportTicketFromRow(row: typeof supportTickets.$inferSelect) {
+  return {
+    id: row.id,
+    phone: row.phone,
+    subject: row.subject,
+    message: row.message,
+    status: row.status,
+    priority: row.priority,
+    createdAt: row.createdAt,
+    updatedAt: row.updatedAt,
+  }
+}
+
+export async function createSupportTicket(data: {
+  phone: string
+  subject: string
+  message: string
+  priority?: string
+}) {
+  const now = new Date().toISOString()
+  const id = randomUUID()
+  await getDb().insert(supportTickets).values({
+    id,
+    phone: data.phone,
+    subject: data.subject,
+    message: data.message,
+    status: 'open',
+    priority: data.priority || 'normal',
+    createdAt: now,
+    updatedAt: now,
+  })
+  return { id, ...data, status: 'open', createdAt: now, updatedAt: now }
+}
+
+export async function getSupportTickets(phone: string) {
+  const result = await getDb().select().from(supportTickets)
+    .where(eq(supportTickets.phone, phone))
+    .orderBy(desc(supportTickets.createdAt))
+  return result.map(supportTicketFromRow)
+}
+
+export async function getAllSupportTickets() {
+  const result = await getDb().select().from(supportTickets)
+    .orderBy(desc(supportTickets.createdAt))
+  return result.map(supportTicketFromRow)
+}
+
+export async function updateSupportTicket(id: string, patch: { status?: string; priority?: string }) {
+  const now = new Date().toISOString()
+  await getDb().update(supportTickets).set({ ...patch, updatedAt: now }).where(eq(supportTickets.id, id))
+}
+
+// ---- Audit Log Queries ----
+
+export async function getRecentAuditLogs(limit = 50) {
+  const result = await getDb().select().from(auditLogs).orderBy(desc(auditLogs.createdAt)).limit(limit)
+  return result.map((r) => ({
+    id: r.id,
+    actor: r.actor,
+    actorType: r.actorType,
+    action: r.action,
+    target: r.target || '',
+    targetType: r.targetType || '',
+    details: r.details as Record<string, unknown>,
+    ip: r.ip || '',
+    createdAt: r.createdAt,
+  }))
+}
+
+export async function getAuditLogsByActor(actor: string, limit = 50) {
+  const result = await getDb().select().from(auditLogs)
+    .where(eq(auditLogs.actor, actor))
+    .orderBy(desc(auditLogs.createdAt))
+    .limit(limit)
+  return result.map((r) => ({
+    id: r.id,
+    actor: r.actor,
+    actorType: r.actorType,
+    action: r.action,
+    target: r.target || '',
+    targetType: r.targetType || '',
+    details: r.details as Record<string, unknown>,
+    ip: r.ip || '',
+    createdAt: r.createdAt,
+  }))
+}
+
 export { storageDir } from './storage.js'
+

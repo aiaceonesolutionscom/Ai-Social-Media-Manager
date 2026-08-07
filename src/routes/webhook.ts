@@ -8,12 +8,14 @@ import { saveAudioBuffer } from '../storage.js'
 import { handleUserInput, handleVoiceInput, regeneratePost } from '../pipeline/conversation.js'
 import { cancelPublish, enqueuePublish } from '../pipeline/publish.js'
 import { checkUserAccess, sendAccessDenied } from '../lib/auth.js'
+import { metaConfig } from '../lib/metaConfig.js'
 import {
   getConversation,
   getPost,
   getUser,
   getPackage,
   logMessage,
+  resolveUserPhone,
   setConversation,
   setStage,
   storageDir,
@@ -72,6 +74,29 @@ async function handleButton(phone: string, buttonId: string): Promise<void> {
     await regeneratePost(phone, postId)
     return
   }
+
+  if (buttonId === 'ad_approve') {
+    const conv = await getConversation(phone)
+    if ((conv as any).kind === 'ad_preview') {
+      const { handleAdConversation } = await import('../pipeline/adConversation.js')
+      const convState: any = { kind: 'ad_preview', campaignId: (conv as any).postId, data: (conv as any).data }
+      await handleAdConversation(phone, 'approve', convState)
+    }
+    return
+  }
+
+  if (buttonId === 'ad_edit') {
+    const { handleAdConversation } = await import('../pipeline/adConversation.js')
+    const convState: any = { kind: 'ad_preview', campaignId: (await getConversation(phone) as any).postId }
+    await handleAdConversation(phone, 'edit', convState)
+    return
+  }
+
+  if (buttonId === 'ad_cancel') {
+    await setConversation(phone, { kind: 'idle' })
+    await sendText(phone, '❌ Ad campaign cancelled.')
+    return
+  }
 }
 
 export async function handleWebhook(req: unknown): Promise<{ status: number; body: string }> {
@@ -93,17 +118,14 @@ export async function handleWebhook(req: unknown): Promise<{ status: number; bod
   }
 
   const from = msg.from
-  if (config.whatsapp.recipientPhone && from !== config.whatsapp.recipientPhone) {
-    return { status: 200, body: 'ignored' }
-  }
 
-  // Skip user access checks for button presses (approve/edit/regenerate/cancel)
-  if (!(msg.type === 'interactive' && msg.interactive?.type === 'button_reply')) {
-    const access = await checkUserAccess(from)
-    if (!access.allowed) {
+  const isButtonPress = msg.type === 'interactive' && msg.interactive?.type === 'button_reply'
+  const access = await checkUserAccess(from)
+  if (!access.allowed) {
+    if (!isButtonPress) {
       await sendAccessDenied(from, access.reason || 'unknown')
-      return { status: 200, body: 'ok' }
     }
+    return { status: 200, body: 'ok' }
   }
 
   if (msg.type === 'interactive' && msg.interactive?.type === 'button_reply' && msg.interactive.button_reply) {
@@ -114,7 +136,8 @@ export async function handleWebhook(req: unknown): Promise<{ status: number; bod
   }
 
   if (msg.type === 'audio' && msg.audio?.id) {
-    const user = await getUser(from)
+    const userPhone = await resolveUserPhone(from)
+    const user = await getUser(userPhone)
     if (user?.packageId) {
       const pkg = await getPackage(user.packageId)
       if (pkg?.features && (pkg.features as Record<string, boolean>).voice_transcription === false) {
@@ -150,7 +173,7 @@ export async function handleWebhook(req: unknown): Promise<{ status: number; bod
 export async function handleVerify(req: unknown): Promise<{ status: number; body: string }> {
   const q = req as { query: Record<string, string> }
   const { hub_mode: hubMode, hub_verify_token: verifyToken, hub_challenge: challenge } = q.query ?? {}
-  if (hubMode === 'subscribe' && verifyToken === config.whatsapp.verifyToken) {
+  if (hubMode === 'subscribe' && verifyToken === metaConfig.getVerifyToken()) {
     return { status: 200, body: challenge ?? '' }
   }
   return { status: 403, body: 'Forbidden' }

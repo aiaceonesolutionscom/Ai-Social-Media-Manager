@@ -9,7 +9,7 @@ import { sendImage, sendReplyButtons, sendText } from '../src/lib/whatsapp.js'
 import { cancelPublish } from '../src/pipeline/publish.js'
 import { resetPublishJobs } from '../src/pipeline/publish.js'
 import type { WrittenContent } from '../src/types.js'
-import { PHONE, makeTextPayload, makeButtonPayload, waitForStatus, wait } from './helpers.js'
+import { PHONE, makeTextPayload, makeButtonPayload, waitForStatus, wait, registerTestUser } from './helpers.js'
 
 const publishImageMock = vi.mocked(publishImage)
 const sendTextMock = vi.mocked(sendText)
@@ -63,6 +63,7 @@ describe('Publishing safety & reliability', () => {
     vi.clearAllMocks()
     resetPublishJobs()
     await resetStore()
+    await registerTestUser()
     baseMocks()
   })
 

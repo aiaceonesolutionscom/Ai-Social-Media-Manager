@@ -1,17 +1,18 @@
 import { logger } from './logger.js'
 import { sendText } from './whatsapp.js'
-import { getUser, getPackage } from '../store.js'
+import { getUser, getPackage, resolveUserPhone } from '../store.js'
 import { getBalance } from './tokens.js'
 
 export async function sendWelcomeMessage(phone: string): Promise<void> {
-  const user = await getUser(phone)
+  const userPhone = await resolveUserPhone(phone)
+  const user = await getUser(userPhone)
   if (!user) {
     logger.warn({ phone }, 'cannot send welcome: user not found')
     return
   }
 
   const pkg = user.packageId ? await getPackage(user.packageId) : null
-  const balance = await getBalance(phone)
+  const balance = await getBalance(userPhone)
 
   const message = formatWelcomeMessage(user.name || 'there', pkg?.name || 'Free', balance)
 
@@ -43,10 +44,11 @@ Need help? Just ask me anything!`
 }
 
 export async function sendTokenBalanceMessage(phone: string): Promise<void> {
-  const user = await getUser(phone)
+  const userPhone = await resolveUserPhone(phone)
+  const user = await getUser(userPhone)
   if (!user) return
 
-  const balance = await getBalance(phone)
+  const balance = await getBalance(userPhone)
   const pkg = user.packageId ? await getPackage(user.packageId) : null
 
   const message = `🪙 Your Token Balance

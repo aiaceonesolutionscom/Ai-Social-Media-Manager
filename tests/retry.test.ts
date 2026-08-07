@@ -6,7 +6,7 @@ import { chatJson } from '../src/lib/llm.js'
 import { generateFullDraft, brandCheck } from '../src/pipeline/generate.js'
 import { generateImage } from '../src/lib/image.js'
 import type { AgentDecision, WrittenContent } from '../src/types.js'
-import { IMAGE_BUFFER, PHONE, makeTextPayload, waitForStatus } from './helpers.js'
+import { IMAGE_BUFFER, PHONE, makeTextPayload, waitForStatus, registerTestUser } from './helpers.js'
 
 const chatJsonMock = vi.mocked(chatJson)
 const generateFullDraftMock = vi.mocked(generateFullDraft)
@@ -28,6 +28,7 @@ describe('Scenario 3 — image generation failure is retried and produces a new 
   beforeEach(async () => {
     vi.clearAllMocks()
     await resetStore()
+    await registerTestUser()
     chatJsonMock.mockResolvedValue({ action: 'unclear', reply: 'Please rephrase.' })
     brandCheckMock.mockResolvedValue({ passed: true, grammar: 'PASS', brandVoice: 'PASS', copyright: 'PASS', policy: 'PASS' })
     generateFullDraftMock.mockResolvedValue({

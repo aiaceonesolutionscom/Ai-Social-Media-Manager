@@ -1,6 +1,7 @@
 import { config } from '../config.js'
 import { fetchWithRetry } from './http.js'
 import { logger } from './logger.js'
+import { metaConfig } from './metaConfig.js'
 
 export interface FacebookPublishResult {
   postId: string
@@ -9,7 +10,7 @@ export interface FacebookPublishResult {
 
 async function fbGet(url: string, accessToken: string): Promise<Record<string, unknown>> {
   const separator = url.includes('?') ? '&' : '?'
-  const fullUrl = `https://graph.facebook.com/${config.instagram.apiVersion}${url}${separator}access_token=${accessToken}`
+  const fullUrl = `https://graph.facebook.com/${metaConfig.getFacebookApiVersion()}${url}${separator}access_token=${accessToken}`
 
   const res = await fetchWithRetry(fullUrl)
   const body = await res.json() as Record<string, unknown>
@@ -22,7 +23,7 @@ async function fbGet(url: string, accessToken: string): Promise<Record<string, u
 }
 
 async function fbPost(url: string, body: Record<string, unknown>, accessToken: string): Promise<Record<string, unknown>> {
-  const fullUrl = `https://graph.facebook.com/${config.instagram.apiVersion}${url}`
+  const fullUrl = `https://graph.facebook.com/${metaConfig.getFacebookApiVersion()}${url}`
 
   const res = await fetchWithRetry(fullUrl, {
     method: 'POST',
@@ -88,9 +89,7 @@ export async function publishToFacebook(
     throw new Error('Failed to create Facebook post: no ID returned')
   }
 
-  logger.info({ postId }, 'Facebook post created, waiting for processing')
-
-  await waitForPostProcessing(postId, accessToken)
+  logger.info({ postId }, 'Facebook post created')
 
   let permalink = `https://facebook.com/${postId}`
   try {
@@ -107,5 +106,6 @@ export async function publishToFacebook(
 }
 
 export function validateFacebookConfig(): boolean {
-  return !!(config.facebook.pageId && config.facebook.accessToken)
+  return !!(config.facebook.pageId && (config.facebook.accessToken || metaConfig.isConfigured()))
 }
+

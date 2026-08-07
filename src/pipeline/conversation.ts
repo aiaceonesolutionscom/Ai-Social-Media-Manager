@@ -1,11 +1,13 @@
 import { chatJson } from '../lib/llm.js'
 import { logger } from '../lib/logger.js'
-import { fullCaption } from '../lib/caption.js'
+import { fullCaption, platformCaption } from '../lib/caption.js'
 import { sendImage, sendReplyButtons, sendText, localFileUrl } from '../lib/whatsapp.js'
 import { generateImage } from '../lib/image.js'
 import { saveImageBuffer } from '../storage.js'
 import { brandCheck, generateFullDraft, generateImagePrompt, planEdit } from './generate.js'
 import { cancelPublish, enqueuePublish } from './publish.js'
+import { handleAdConversation } from './adConversation.js'
+import { isUrl, normalizeUrl, analyzeWebsite, type WebsiteAnalysis } from '../lib/urlAnalyzer.js'
 import {
   createPost,
   getBrandProfile,
@@ -16,6 +18,7 @@ import {
   getPackage,
   getUserPreferences,
   logMessage,
+  resolveUserPhone,
   saveEdit,
   setConversation,
   setStage,
@@ -26,22 +29,24 @@ interface PlatformInfo {
   platforms: string[]
   primaryLabel: string
   allLabel: string
+  hasAdCampaigns: boolean
 }
 
 async function getPlatformInfo(phone: string): Promise<PlatformInfo> {
-  const user = await getUser(phone)
+  const userPhone = await resolveUserPhone(phone)
+  const user = await getUser(userPhone)
   const pkg = user?.packageId ? await getPackage(user.packageId) : null
   const features = (pkg?.features || {}) as Record<string, boolean>
 
   const platforms: string[] = []
-  if (features.facebook_publishing !== false) platforms.push('facebook')
-  if (features.instagram_publishing !== false) platforms.push('instagram')
-  if (platforms.length === 0) platforms.push('facebook', 'instagram')
+  if (features.facebook_publishing === true) platforms.push('facebook')
+  if (features.instagram_publishing === true) platforms.push('instagram')
 
-  const primary = platforms.includes('instagram') ? 'Instagram' : 'Facebook'
-  const allLabel = platforms.length > 1 ? 'social media' : primary
+  const primary = platforms.length > 0 ? (platforms.includes('instagram') ? 'Instagram' : 'Facebook') : 'social media'
+  const allLabel = platforms.length > 1 ? 'social media' : (platforms.length === 1 ? primary : 'social media')
+  const hasAdCampaigns = features.ad_campaigns === true
 
-  return { platforms, primaryLabel: primary, allLabel }
+  return { platforms, primaryLabel: primary, allLabel, hasAdCampaigns }
 }
 
 const CORE_SYSTEM = `You are a professional social media manager chatting on WhatsApp.
@@ -89,12 +94,13 @@ ${await historyBlock(phone)}
 
 Decide the user's intended action from their latest message. Return ONLY a JSON object:
 {
-  "action": "smalltalk" | "ask_question" | "generate_post" | "edit_request" | "approve" | "regenerate" | "cancel_publish" | "new_post" | "unclear",
+  "action": "smalltalk" | "ask_question" | "generate_post" | "edit_request" | "approve" | "regenerate" | "cancel_publish" | "new_post" | "create_ad" | "unclear",
   "reply": "a short, natural response to send (optional)",
   "question": "the single next question to ask (only for ask_question)",
   "intent": { "topic": "", "audience": "", "tone": "", "goal": "", "language": "", "emotion": "" },
   "editRequest": "a concise paraphrase of the requested edit (only for edit_request)"
 }
+Use "create_ad" when the user wants to run ads, promote something, create a campaign, or boost a post.
 Fill as many intent fields as you can infer from context and history. Never guess fields you cannot infer.`
 }
 
@@ -154,9 +160,19 @@ async function safeGenerateImage(prompt: string): Promise<Buffer> {
 
 export async function sendPreview(phone: string, post: Post): Promise<void> {
   const pi = await getPlatformInfo(phone)
-  const caption = fullCaption(post.content!)
   const url = post.imageUrl!
-  await sendImage(phone, url, caption)
+
+  // Use platform-specific caption if available, fallback to default
+  if (pi.platforms.length > 1 && post.platformContent?.facebook && post.platformContent?.instagram) {
+    // Show Instagram preview first (primary)
+    const igCaption = platformCaption(post.platformContent.instagram, 'instagram')
+    await sendImage(phone, url, igCaption)
+    await sendText(phone, `📱 **Instagram version** shown above.\n\nYour Facebook version will have a different caption optimized for Facebook.\n\nBoth will be published when you approve.`)
+  } else {
+    const caption = fullCaption(post.content!)
+    await sendImage(phone, url, caption)
+  }
+
   await sendText(phone, REVIEW_MESSAGE_TEMPLATE(pi.allLabel))
   await sendReplyButtons(phone, 'What would you like to do?', [
     { id: 'publish', title: '✅ Publish' },
@@ -282,7 +298,49 @@ export async function handleUserInput(
   const conv = await getConversation(phone)
   const pi = await getPlatformInfo(phone)
 
+  // Check for ad-related keywords and feature gate
+  const adKeywords = /\b(ad|ads|campaign|campaigns|promote|promotion|boost|boosting|marketing ad|meta ad|facebook ad|instagram ad|run ad|advertise)\b/i
+  if (adKeywords.test(content) && !pi.hasAdCampaigns) {
+    await safeSend(phone, '❌ Meta Ads is not included in your current plan. Please upgrade your package to use this feature.\n\nYou can check available packages by saying "show packages" or visit your dashboard.')
+    return
+  }
+
+  // Route to ad conversation if user wants to create an ad
+  if (adKeywords.test(content) && pi.hasAdCampaigns) {
+    await handleAdConversation(phone, content, { kind: 'ad_gathering', step: 'topic', data: {} })
+    return
+  }
+
   if (conv.kind === 'idle') {
+    // Check if user sent a URL - analyze and generate content
+    if (isUrl(content)) {
+      const url = normalizeUrl(content)
+      await safeSend(phone, '🔍 Analyzing your website... This may take a moment.')
+      try {
+        const analysis = await analyzeWebsite(url)
+        const topic = analysis.businessName !== 'Unknown Business'
+          ? `${analysis.businessName} - ${analysis.businessType}`
+          : analysis.businessType
+        const postId = (await createPost(phone)).id
+        await setConversation(phone, { kind: 'generating', postId })
+        await safeSend(phone, `Found: **${analysis.businessName}** (${analysis.businessType})\n\nServices: ${analysis.services.join(', ')}\nTone: ${analysis.brandTone}\nAudience: ${analysis.targetAudience}\n\nGenerating your post... 🎨`)
+
+        const intent = {
+          topic,
+          audience: analysis.targetAudience,
+          tone: analysis.brandTone,
+          goal: 'promote business',
+          language: 'English',
+          emotion: 'trustworthy',
+        }
+        await runPipeline(phone, postId, `Create a social media post for ${analysis.businessName}, a ${analysis.businessType}. Services: ${analysis.services.join(', ')}. Tone: ${analysis.brandTone}. Target audience: ${analysis.targetAudience}. Key messages: ${analysis.keyMessages.join(', ')}`, intent)
+      } catch (err) {
+        logger.error({ phone, error: (err as Error).message }, 'URL analysis failed')
+        await safeSend(phone, `❌ Could not analyze that website: ${(err as Error).message}\n\nTell me what the post should be about instead.`)
+      }
+      return
+    }
+
     const d = await classify(phone, `No draft in progress. The user may want to start a new ${pi.allLabel} post or just chat.`, undefined, content)
     if (d.action === 'generate_post') {
       const postId = (await createPost(phone)).id

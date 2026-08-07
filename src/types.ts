@@ -38,6 +38,11 @@ export interface WrittenContent {
   seoKeywords: string[]
 }
 
+export interface PlatformContent {
+  facebook?: WrittenContent
+  instagram?: WrittenContent
+}
+
 export interface BrandCheck {
   passed: boolean
   grammar: string
@@ -62,6 +67,7 @@ export interface Post {
   intent?: Intent
   plan?: PlannedContent
   content?: WrittenContent
+  platformContent?: PlatformContent
   brandCheck?: BrandCheck
   imagePrompt?: string
   imagePath?: string
@@ -107,6 +113,8 @@ export type ConversationState =
   | { kind: 'editing'; postId: string }
   | { kind: 'preparing_publish'; postId: string }
   | { kind: 'publishing'; postId: string }
+  | { kind: 'ad_gathering'; postId: string; step: string; data: Record<string, unknown> }
+  | { kind: 'ad_preview'; postId: string }
 
 export type PendingConversation = ConversationState
 
@@ -119,6 +127,7 @@ export type AgentAction =
   | 'regenerate'
   | 'cancel_publish'
   | 'new_post'
+  | 'create_ad'
   | 'unclear'
 
 export interface AgentDecision {
@@ -240,9 +249,91 @@ export interface Payment {
 
 export type TokenAction = 'standard_post' | 'cross_platform' | 'image_regenerate' | 'ad_campaign'
 
+export interface AdContent {
+  headline: string
+  primaryText: string
+  description: string
+  callToAction: string
+  linkUrl?: string
+}
+
+export interface AdTargeting {
+  ageMin: number
+  ageMax: number
+  genders: string[]
+  locations: string[]
+  interests: string[]
+}
+
+export interface AdCampaign {
+  id: string
+  phone: string
+  postId?: string
+  name: string
+  objective: string
+  status: 'pending' | 'creating' | 'active' | 'paused' | 'failed'
+  adContent: AdContent
+  targeting: AdTargeting
+  budgetCents: number
+  campaignId?: string
+  adSetId?: string
+  adId?: string
+  imageUrl?: string
+  createdAt: string
+  updatedAt: string
+}
+
 export interface UserSession {
   token: string
   userEmail: string
   createdAt: string
   expiresAt: string
+}
+
+// ---- AI Provider Types ----
+
+export type AIProviderCategory = 'stt' | 'llm' | 'image'
+
+export interface AIProvider {
+  id: string
+  category: AIProviderCategory
+  provider: string
+  displayName: string
+  apiKey: string
+  baseUrl: string
+  model: string
+  config: Record<string, unknown>
+  isActive: boolean
+  isDefault: boolean
+  createdAt: string
+  updatedAt: string
+}
+
+export type AIProviderInput = Omit<AIProvider, 'id' | 'createdAt' | 'updatedAt'>
+
+export interface AIUsageLog {
+  id: string
+  phone: string
+  providerId: string
+  category: AIProviderCategory
+  model: string
+  feature: string
+  tokensInput: number
+  tokensOutput: number
+  estimatedCostCents: number
+  durationMs: number
+  success: boolean
+  error: string
+  createdAt: string
+}
+
+export interface AICostConfig {
+  id: string
+  provider: string
+  category: AIProviderCategory
+  costPer1MInputTokens: number
+  costPer1MOutputTokens: number
+  costPerImage: number
+  costPerAudioMinute: number
+  updatedAt: string
 }

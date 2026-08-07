@@ -1,9 +1,12 @@
 import { config } from './config.js'
 import { initStore, recoverStuckPosts, listPackages, getAllConfig, getUser, getPackage } from './store.js'
+import { providerManager } from './lib/ai/providerManager.js'
+import { metaConfig } from './lib/metaConfig.js'
 import { closeDb } from './db.js'
 import { registerMediaRoute } from './routes/media.js'
 import { handleWebhook, handleVerify } from './routes/webhook.js'
 import { handleUserInput, handleVoiceInput } from './pipeline/conversation.js'
+import { startPublishScheduler } from './pipeline/publish.js'
 import { ensureReady } from './config.js'
 import { verifyWebhookSignature } from './lib/whatsapp.js'
 import { rateLimit } from './lib/ratelimit.js'
@@ -13,16 +16,25 @@ import { registerAdminUserRoutes } from './routes/admin-api/users.js'
 import { registerAdminPaymentRoutes } from './routes/admin-api/payments.js'
 import { registerAdminSettingsRoutes } from './routes/admin-api/settings.js'
 import { registerAdminStatsRoutes } from './routes/admin-api/stats.js'
+import { registerAdminAIProviderRoutes } from './routes/admin-api/ai-providers.js'
+import { registerAdminMetaSettingsRoutes } from './routes/admin-api/meta-settings.js'
+import { registerSupportRoutes } from './routes/support.js'
+import { registerHealthRoutes } from './routes/health.js'
+import { registerBillingRoutes } from './routes/billing.js'
 import { registerStripeRoutes } from './routes/stripe.js'
 import { registerAuthRoutes } from './routes/auth.js'
 import { registerSocialRoutes } from './routes/social.js'
 import { registerCheckoutRoutes } from './routes/checkout.js'
+import { registerChatRoutes } from './routes/chat.js'
 import { verifySession } from './lib/userAuth.js'
 import { adminAuthMiddleware } from './routes/admin-api/middleware.js'
 
 async function main(): Promise<void> {
   await initStore()
+  await providerManager.load()
+  await metaConfig.load()
   await recoverStuckPosts()
+  startPublishScheduler()
   // ensureReady() — commented out for dev mode without real API keys
 
   if (config.admin.email === 'admin@example.com' || config.admin.password === 'admin123') {
@@ -158,6 +170,19 @@ async function main(): Promise<void> {
     return reply.send({ features: pkg?.features || {} })
   })
 
+  // User API: get current user's posts
+  server.get('/api/posts', async (req: any, reply: any) => {
+    const token = req.headers['authorization']?.replace('Bearer ', '') || ''
+    if (!token) return reply.status(401).send({ error: 'No token provided' })
+
+    const session = await verifySession(token)
+    if (!session) return reply.status(401).send({ error: 'Invalid or expired session' })
+
+    const { listPostsForUser } = await import('./store.js')
+    const posts = await listPostsForUser(session.phone)
+    return reply.send({ posts })
+  })
+
   server.addHook('preHandler', adminAuthMiddleware)
 
   registerAdminAuthRoutes(server)
@@ -166,10 +191,16 @@ async function main(): Promise<void> {
   registerAdminPaymentRoutes(server)
   registerAdminSettingsRoutes(server)
   registerAdminStatsRoutes(server)
+  registerAdminAIProviderRoutes(server)
+  registerAdminMetaSettingsRoutes(server)
+  registerSupportRoutes(server)
+  registerHealthRoutes(server)
+  registerBillingRoutes(server)
   registerStripeRoutes(server)
   registerAuthRoutes(server)
   registerSocialRoutes(server)
   registerCheckoutRoutes(server)
+  registerChatRoutes(server)
 
   server.get('/', async () => {
     return { status: 'ok', message: 'AI Instagram Agent is running' }

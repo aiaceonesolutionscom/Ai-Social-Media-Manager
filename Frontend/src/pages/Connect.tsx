@@ -9,7 +9,7 @@ import { Modal } from '../components/ui/Modal';
 import { PlatformStatus } from '../components/user/PlatformStatus';
 import { PageTransition } from '../components/layout/PageTransition';
 import { notify } from '../components/ui/Toast';
-import { apiRequest, endpoints } from '../utils/api';
+import { apiRequest, endpoints, getUserToken } from '../utils/api';
 import { useUserAuth } from '../contexts/UserAuthContext';
 import type { Platform } from '../types';
 import { cn } from '../utils/cn';
@@ -20,7 +20,6 @@ const currentStep = 2;
 const PLATFORM_FEATURE_MAP: Record<string, string> = {
   facebook: 'facebook_publishing',
   instagram: 'instagram_publishing',
-  whatsapp: 'whatsapp_broadcasts',
 };
 
 const ALL_PLATFORMS: Platform[] = [
@@ -100,7 +99,8 @@ export function Connect() {
 
     // For Facebook and Instagram, redirect to OAuth
     if (platform.id === 'facebook' || platform.id === 'instagram') {
-      window.location.href = `${window.location.origin}/api/social/connect/${platform.id}`;
+      const token = getUserToken();
+      window.location.href = `${window.location.origin}/api/social/connect/${platform.id}?token=${encodeURIComponent(token || '')}`;
       return;
     }
 

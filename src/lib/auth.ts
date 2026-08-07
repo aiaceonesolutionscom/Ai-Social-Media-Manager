@@ -1,6 +1,6 @@
 import { config } from '../config.js'
 import { logger } from './logger.js'
-import { getUser } from '../store.js'
+import { getUser, resolveUserPhone } from '../store.js'
 import { sendText } from './whatsapp.js'
 import { getBalance, hasEnoughTokens, getTokenCost } from './tokens.js'
 import type { TokenAction } from '../types.js'
@@ -31,11 +31,11 @@ export async function checkUserAccess(phone: string): Promise<{
   reason?: string
   user?: Awaited<ReturnType<typeof getUser>>
 }> {
-  const user = await getUser(phone)
+  const userPhone = await resolveUserPhone(phone)
+  const user = await getUser(userPhone)
 
-  // If user is not registered, allow them (backward compatible with single-user mode)
   if (!user) {
-    return { allowed: true, user: undefined }
+    return { allowed: false, reason: 'not_registered', user: undefined }
   }
 
   if (user.active !== 1) {

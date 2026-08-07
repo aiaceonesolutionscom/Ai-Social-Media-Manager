@@ -3,7 +3,7 @@ import './setupMocks.js'
 import { initStore, resetStore, listPosts } from '../src/store.js'
 import { handleWebhook } from '../src/routes/webhook.js'
 import { chatJson } from '../src/lib/llm.js'
-import { PHONE, makeTextPayload } from './helpers.js'
+import { PHONE, makeTextPayload, registerTestUser } from './helpers.js'
 
 const chatJsonMock = vi.mocked(chatJson)
 
@@ -13,6 +13,7 @@ describe('Webhook message deduplication', () => {
   beforeEach(async () => {
     vi.clearAllMocks()
     await resetStore()
+    await registerTestUser()
     chatJsonMock.mockResolvedValue({ action: 'smalltalk', reply: 'Hi! 👋' })
   })
 

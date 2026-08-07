@@ -5,9 +5,25 @@ import { connectAccount, getAccounts, disconnectAccount } from '../store.js'
 import { logger } from '../lib/logger.js'
 import { sendText } from '../lib/whatsapp.js'
 import { generateOtp, storeOtp, verifyOtp, signState, verifyState } from '../lib/otp.js'
+import { requireFeature } from '../lib/packagePermissions.js'
+import { metaConfig } from '../lib/metaConfig.js'
+
+function getOAuthClientId(): string {
+  return metaConfig.getAppId() || config.oauth.facebook.clientId || '';
+}
+
+function getOAuthClientSecret(): string {
+  return metaConfig.getAppSecret() || config.oauth.facebook.clientSecret || ''
+}
+
+function getOAuthCallbackUrl(): string {
+  return metaConfig.getDefaultCallbackUri() || config.oauth.facebook.callbackUrl || `${config.publicBaseUrl}/api/social/connect/facebook/callback`;
+}
 
 async function requireUser(req: any): Promise<string | null> {
-  const token = req.headers['authorization']?.replace('Bearer ', '') || ''
+  const headerToken = req.headers['authorization']?.replace('Bearer ', '') || ''
+  const queryToken = (req.query as { token?: string })?.token || ''
+  const token = headerToken || queryToken
   if (!token) return null
   const session = await verifySession(token)
   return session?.phone || null
@@ -49,7 +65,13 @@ export async function registerSocialRoutes(server: FastifyInstance): Promise<voi
     const phone = await requireUser(req)
     if (!phone) return reply.status(401).send({ error: 'Unauthorized' })
 
-    if (!config.oauth.facebook.clientId) {
+    try {
+      await requireFeature(phone, 'facebook_publishing')
+    } catch (err: any) {
+      return reply.status(403).send({ error: err.message })
+    }
+
+    if (!getOAuthClientId()) {
       if (config.dev.enabled) {
         logger.info({ phone }, 'DEV MODE: Facebook connect simulated (no FB app configured)')
         await connectAccount({
@@ -66,7 +88,7 @@ export async function registerSocialRoutes(server: FastifyInstance): Promise<voi
 
     const state = await signState(phone)
     const scopes = 'pages_manage_posts,pages_read_engagement,instagram_basic,instagram_content_publish,pages_show_list'
-    const url = `https://www.facebook.com/v21.0/dialog/oauth?client_id=${config.oauth.facebook.clientId}&redirect_uri=${encodeURIComponent(config.oauth.facebook.callbackUrl)}&scope=${scopes}&state=${state}`
+    const url = `https://www.facebook.com/v21.0/dialog/oauth?client_id=${getOAuthClientId()}&redirect_uri=${encodeURIComponent(getOAuthCallbackUrl())}&scope=${scopes}&state=${state}`
     return reply.redirect(url)
   })
 
@@ -79,12 +101,12 @@ export async function registerSocialRoutes(server: FastifyInstance): Promise<voi
 
     try {
       // Exchange code for short-lived token
-      const tokenRes = await fetch(`https://graph.facebook.com/v21.0/oauth/access_token?client_id=${config.oauth.facebook.clientId}&redirect_uri=${encodeURIComponent(config.oauth.facebook.callbackUrl)}&client_secret=${config.oauth.facebook.clientSecret}&code=${code}`)
+      const tokenRes = await fetch(`https://graph.facebook.com/v21.0/oauth/access_token?client_id=${getOAuthClientId()}&redirect_uri=${encodeURIComponent(getOAuthCallbackUrl())}&client_secret=${getOAuthClientSecret()}&code=${code}`)
       const tokenData = await tokenRes.json() as any
       if (!tokenData.access_token) throw new Error('Failed to get short-lived token')
 
       // Exchange for long-lived token
-      const longTokenRes = await fetch(`https://graph.facebook.com/v21.0/oauth/access_token?grant_type=fb_exchange_token&client_id=${config.oauth.facebook.clientId}&client_secret=${config.oauth.facebook.clientSecret}&fb_exchange_token=${tokenData.access_token}`)
+      const longTokenRes = await fetch(`https://graph.facebook.com/v21.0/oauth/access_token?grant_type=fb_exchange_token&client_id=${getOAuthClientId()}&client_secret=${getOAuthClientSecret()}&fb_exchange_token=${tokenData.access_token}`)
       const longTokenData = await longTokenRes.json() as any
       const accessToken = longTokenData.access_token || tokenData.access_token
 
@@ -134,7 +156,13 @@ export async function registerSocialRoutes(server: FastifyInstance): Promise<voi
     const phone = await requireUser(req)
     if (!phone) return reply.status(401).send({ error: 'Unauthorized' })
 
-    if (!config.oauth.facebook.clientId) {
+    try {
+      await requireFeature(phone, 'instagram_publishing')
+    } catch (err: any) {
+      return reply.status(403).send({ error: err.message })
+    }
+
+    if (!getOAuthClientId()) {
       if (config.dev.enabled) {
         logger.info({ phone }, 'DEV MODE: Instagram connect simulated (no FB app configured)')
         await connectAccount({
@@ -152,7 +180,7 @@ export async function registerSocialRoutes(server: FastifyInstance): Promise<voi
     // Instagram uses Facebook Login
     const state = await signState(phone)
     const scopes = 'instagram_basic,instagram_content_publish,pages_show_list,pages_manage_posts'
-    const url = `https://www.facebook.com/v21.0/dialog/oauth?client_id=${config.oauth.facebook.clientId}&redirect_uri=${encodeURIComponent(config.oauth.facebook.callbackUrl)}&scope=${scopes}&state=${state}`
+    const url = `https://www.facebook.com/v21.0/dialog/oauth?client_id=${getOAuthClientId()}&redirect_uri=${encodeURIComponent(getOAuthCallbackUrl())}&scope=${scopes}&state=${state}`
     return reply.redirect(url)
   })
 
@@ -220,3 +248,5 @@ export async function registerSocialRoutes(server: FastifyInstance): Promise<voi
     return reply.send({ success: true, message: 'WhatsApp connected' })
   })
 }
+
+

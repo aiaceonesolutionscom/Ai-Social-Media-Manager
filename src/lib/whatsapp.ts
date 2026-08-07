@@ -3,15 +3,26 @@ import { config } from '../config.js'
 import { fetchWithRetry } from './http.js'
 import { logger } from './logger.js'
 import { getConversation, logMessage } from '../store.js'
+import { metaConfig } from './metaConfig.js'
 
-const WA_API = 'https://graph.facebook.com/v21.0'
+function getWhatsAppApiBase(): string {
+  return `https://graph.facebook.com/${metaConfig.getWhatsAppApiVersion()}`
+}
+
+function getWhatsAppToken(): string {
+  return metaConfig.getWhatsAppToken() || config.whatsapp.token || ''
+}
+
+function getWhatsAppPhoneId(): string {
+  return metaConfig.getWhatsAppPhoneId() || config.whatsapp.phoneNumberId || ''
+}
 
 function isWhatsAppMocked(): boolean {
-  return config.dev.enabled && (!config.whatsapp.token || !config.whatsapp.phoneNumberId)
+  return config.dev.enabled && (!getWhatsAppToken() || !getWhatsAppPhoneId())
 }
 
 async function api(path: string, init?: RequestInit): Promise<Record<string, unknown>> {
-  const res = await fetchWithRetry(`${WA_API}${path}`, init)
+  const res = await fetchWithRetry(`${getWhatsAppApiBase()}${path}`, init)
   const body = (await res.json().catch(() => ({}))) as Record<string, unknown>
   if (!res.ok) {
     throw new Error(`WhatsApp API ${res.status}: ${JSON.stringify(body)}`)
@@ -24,14 +35,22 @@ function mockResult(label: string): Record<string, unknown> {
   return { id: `dev_${crypto.randomUUID().slice(0, 12)}`, messaging_product: 'whatsapp' }
 }
 
+// Web-only users have canonical synthetic phone keys (u_...). The bot conversation is
+// still logged to the messages table so the website dashboard chat can show it, but there
+// is no real WhatsApp number to deliver to — skip the WhatsApp API call entirely.
+function isWebOnlyPhone(to: string): boolean {
+  return to.startsWith('u_')
+}
+
 export async function sendText(to: string, text: string): Promise<Record<string, unknown>> {
   const conv = await getConversation(to)
   await logMessage({ phone: to, role: 'bot', type: 'text', content: text, postId: conv.postId })
+  if (isWebOnlyPhone(to)) return mockResult('sendText')
   if (isWhatsAppMocked()) return mockResult('sendText')
-  return api(`/${config.whatsapp.phoneNumberId}/messages`, {
+  return api(`/${getWhatsAppPhoneId()}/messages`, {
     method: 'POST',
     headers: {
-      Authorization: `Bearer ${config.whatsapp.token}`,
+      Authorization: `Bearer ${getWhatsAppToken()}`,
       'Content-Type': 'application/json',
     },
     body: JSON.stringify({
@@ -46,11 +65,12 @@ export async function sendText(to: string, text: string): Promise<Record<string,
 export async function sendImage(to: string, mediaUrl: string, caption: string): Promise<Record<string, unknown>> {
   const conv = await getConversation(to)
   await logMessage({ phone: to, role: 'bot', type: 'image', content: `[image] ${caption.slice(0, 200)}`, postId: conv.postId })
+  if (isWebOnlyPhone(to)) return mockResult('sendImage')
   if (isWhatsAppMocked()) return mockResult('sendImage')
-  return api(`/${config.whatsapp.phoneNumberId}/messages`, {
+  return api(`/${getWhatsAppPhoneId()}/messages`, {
     method: 'POST',
     headers: {
-      Authorization: `Bearer ${config.whatsapp.token}`,
+      Authorization: `Bearer ${getWhatsAppToken()}`,
       'Content-Type': 'application/json',
     },
     body: JSON.stringify({
@@ -74,11 +94,12 @@ export async function sendReplyButtons(to: string, text: string, buttons: Button
   }))
   const conv = await getConversation(to)
   await logMessage({ phone: to, role: 'bot', type: 'text', content: `[buttons] ${text.slice(0, 200)}`, postId: conv.postId })
+  if (isWebOnlyPhone(to)) return mockResult('sendReplyButtons')
   if (isWhatsAppMocked()) return mockResult('sendReplyButtons')
-  return api(`/${config.whatsapp.phoneNumberId}/messages`, {
+  return api(`/${getWhatsAppPhoneId()}/messages`, {
     method: 'POST',
     headers: {
-      Authorization: `Bearer ${config.whatsapp.token}`,
+      Authorization: `Bearer ${getWhatsAppToken()}`,
       'Content-Type': 'application/json',
     },
     body: JSON.stringify({
@@ -96,19 +117,19 @@ export async function sendReplyButtons(to: string, text: string, buttons: Button
 
 export async function downloadMedia(mediaId: string): Promise<Buffer> {
   const info = (await api(`/${mediaId}`, {
-    headers: { Authorization: `Bearer ${config.whatsapp.token}` },
+    headers: { Authorization: `Bearer ${getWhatsAppToken()}` },
   })) as { url?: string }
   if (!info.url) throw new Error(`No media url for id ${mediaId}`)
   const res = await fetchWithRetry(info.url, {
-    headers: { Authorization: `Bearer ${config.whatsapp.token}` },
+    headers: { Authorization: `Bearer ${getWhatsAppToken()}` },
   })
   if (!res.ok) throw new Error(`Failed to download media: ${res.status}`)
   return Buffer.from(await res.arrayBuffer())
 }
 
 export function verifyWebhookSignature(rawBody: string, signatureHeader: string | undefined): boolean {
-  if (!config.whatsapp.appSecret || !signatureHeader) return false
-  const expected = 'sha256=' + crypto.createHmac('sha256', config.whatsapp.appSecret).update(rawBody).digest('hex')
+  if (!metaConfig.getWebhookSecret() || !signatureHeader) return false
+  const expected = 'sha256=' + crypto.createHmac('sha256', metaConfig.getWebhookSecret()).update(rawBody).digest('hex')
   const received = signatureHeader.trim()
   if (!received) return false
   const a = Buffer.from(expected)
@@ -120,3 +141,4 @@ export function verifyWebhookSignature(rawBody: string, signatureHeader: string 
 export function localFileUrl(relPath: string): string {
   return `${config.publicBaseUrl}/media/${encodeURIComponent(relPath.split('/').pop()!)}`
 }
+

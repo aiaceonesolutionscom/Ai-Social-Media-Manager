@@ -128,6 +128,7 @@ export const socialAccounts = pgTable('social_accounts', {
   index('idx_social_phone').on(table.phone),
   index('idx_social_platform').on(table.platform),
   index('idx_social_status').on(table.status),
+  uniqueIndex('idx_social_phone_platform').on(table.phone, table.platform),
 ])
 
 export const userSessions = pgTable('user_sessions', {
@@ -157,4 +158,163 @@ export const payments = pgTable('payments', {
   index('idx_payments_phone').on(table.phone),
   index('idx_payments_status').on(table.status),
   index('idx_payments_stripe').on(table.stripeSessionId),
+])
+
+export const adCampaigns = pgTable('ad_campaigns', {
+  id: text('id').primaryKey(),
+  phone: text('phone').notNull(),
+  postId: text('post_id'),
+  name: text('name').notNull(),
+  objective: text('objective').notNull(),
+  status: text('status').notNull().default('pending'),
+  adContent: jsonb('ad_content').notNull(),
+  targeting: jsonb('targeting').notNull(),
+  budgetCents: integer('budget_cents').notNull(),
+  campaignId: text('campaign_id'),
+  adSetId: text('ad_set_id'),
+  adId: text('ad_id'),
+  imageUrl: text('image_url'),
+  createdAt: text('created_at').notNull(),
+  updatedAt: text('updated_at').notNull(),
+}, (table) => [
+  index('idx_ad_campaigns_phone').on(table.phone),
+  index('idx_ad_campaigns_status').on(table.status),
+])
+
+// ---- AI Provider Tables ----
+
+export const aiProviders = pgTable('ai_providers', {
+  id: text('id').primaryKey(),
+  category: text('category').notNull(),
+  provider: text('provider').notNull(),
+  displayName: text('display_name').notNull(),
+  apiKey: text('api_key'),
+  baseUrl: text('base_url'),
+  model: text('model'),
+  config: jsonb('config').notNull().default({}),
+  isActive: boolean('is_active').notNull().default(false),
+  isDefault: boolean('is_default').notNull().default(false),
+  createdAt: text('created_at').notNull(),
+  updatedAt: text('updated_at').notNull(),
+}, (table) => [
+  index('idx_ai_providers_category').on(table.category),
+  index('idx_ai_providers_active').on(table.isActive),
+])
+
+export const aiUsageLogs = pgTable('ai_usage_logs', {
+  id: text('id').primaryKey(),
+  phone: text('phone'),
+  providerId: text('provider_id').notNull(),
+  category: text('category').notNull(),
+  model: text('model'),
+  feature: text('feature'),
+  tokensInput: integer('tokens_input').notNull().default(0),
+  tokensOutput: integer('tokens_output').notNull().default(0),
+  estimatedCostCents: integer('estimated_cost_cents').notNull().default(0),
+  durationMs: integer('duration_ms').notNull().default(0),
+  success: boolean('success').notNull().default(true),
+  error: text('error'),
+  createdAt: text('created_at').notNull(),
+}, (table) => [
+  index('idx_ai_usage_provider').on(table.providerId),
+  index('idx_ai_usage_category').on(table.category),
+  index('idx_ai_usage_created').on(table.createdAt),
+  index('idx_ai_usage_phone').on(table.phone),
+])
+
+export const aiProviderCosts = pgTable('ai_provider_costs', {
+  id: text('id').primaryKey(),
+  provider: text('provider').notNull(),
+  category: text('category').notNull(),
+  costPer1MInputTokens: integer('cost_per_1m_input_tokens').notNull().default(0),
+  costPer1MOutputTokens: integer('cost_per_1m_output_tokens').notNull().default(0),
+  costPerImage: integer('cost_per_image').notNull().default(0),
+  costPerAudioMinute: integer('cost_per_audio_minute').notNull().default(0),
+  updatedAt: text('updated_at').notNull(),
+}, (table) => [
+  index('idx_ai_costs_provider').on(table.provider),
+  uniqueIndex('idx_ai_costs_provider_category').on(table.provider, table.category),
+])
+
+// ---- Meta Platform Tables ----
+
+export const metaConfig = pgTable('meta_config', {
+  id: text('id').primaryKey(),
+  category: text('category').notNull(),
+  key: text('key').notNull(),
+  value: text('value'),
+  isSensitive: boolean('is_sensitive').notNull().default(false),
+  updatedAt: text('updated_at').notNull(),
+}, (table) => [
+  index('idx_meta_config_category').on(table.category),
+  uniqueIndex('idx_meta_config_key').on(table.category, table.key),
+])
+
+// ---- Support Tickets ----
+
+export const supportTickets = pgTable('support_tickets', {
+  id: text('id').primaryKey(),
+  phone: text('phone').notNull(),
+  subject: text('subject').notNull(),
+  message: text('message').notNull(),
+  status: text('status').notNull().default('open'),
+  priority: text('priority').notNull().default('normal'),
+  createdAt: text('created_at').notNull(),
+  updatedAt: text('updated_at').notNull(),
+}, (table) => [
+  index('idx_support_phone').on(table.phone),
+  index('idx_support_status').on(table.status),
+])
+
+// ---- Audit Logs ----
+
+export const auditLogs = pgTable('audit_logs', {
+  id: text('id').primaryKey(),
+  actor: text('actor').notNull(),
+  actorType: text('actor_type').notNull().default('user'),
+  action: text('action').notNull(),
+  target: text('target'),
+  targetType: text('target_type'),
+  details: jsonb('details').notNull().default({}),
+  ip: text('ip'),
+  createdAt: text('created_at').notNull(),
+}, (table) => [
+  index('idx_audit_actor').on(table.actor),
+  index('idx_audit_action').on(table.action),
+  index('idx_audit_created').on(table.createdAt),
+])
+
+// ---- Webhook Events ----
+
+export const webhookEvents = pgTable('webhook_events', {
+  id: text('id').primaryKey(),
+  source: text('source').notNull(),
+  eventType: text('event_type').notNull(),
+  payload: jsonb('payload').notNull().default({}),
+  headers: jsonb('headers').notNull().default({}),
+  status: text('status').notNull().default('received'),
+  responseCode: integer('response_code'),
+  error: text('error'),
+  retryCount: integer('retry_count').notNull().default(0),
+  createdAt: text('created_at').notNull(),
+}, (table) => [
+  index('idx_webhook_source').on(table.source),
+  index('idx_webhook_status').on(table.status),
+  index('idx_webhook_created').on(table.createdAt),
+])
+
+// ---- Scheduled Posts ----
+
+export const scheduledPosts = pgTable('scheduled_posts', {
+  id: text('id').primaryKey(),
+  postId: text('post_id').notNull(),
+  phone: text('phone').notNull(),
+  publishAt: text('publish_at').notNull(),
+  status: text('status').notNull().default('pending'),
+  createdAt: text('created_at').notNull(),
+  processedAt: text('processed_at'),
+}, (table) => [
+  index('idx_scheduled_publish_at').on(table.publishAt),
+  index('idx_scheduled_status').on(table.status),
+  index('idx_scheduled_phone').on(table.phone),
 ])

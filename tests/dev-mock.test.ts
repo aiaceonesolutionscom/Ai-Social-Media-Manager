@@ -43,7 +43,7 @@ describe('DEV_MODE mock layer', () => {
 
   it('generateImage throws when NOT in dev mode and no OpenAI key', async () => {
     config.dev.enabled = false
-    await expect(generateImage('x')).rejects.toThrow('OPENAI_API_KEY')
+    await expect(generateImage('x')).rejects.toThrow(/No active image provider configured/)
   })
 
   it('transcribeAudio returns a mock transcript in dev mode', async () => {
@@ -54,7 +54,7 @@ describe('DEV_MODE mock layer', () => {
 
   it('transcribeAudio throws when NOT in dev mode and no Groq key', async () => {
     config.dev.enabled = false
-    await expect(transcribeAudio('/does/not/exist.ogg')).rejects.toThrow(/GROQ_API_KEY/)
+    await expect(transcribeAudio('/does/not/exist.ogg')).rejects.toThrow(/No active STT provider configured/)
   })
 
   it('publishImage simulates success in dev mode', async () => {

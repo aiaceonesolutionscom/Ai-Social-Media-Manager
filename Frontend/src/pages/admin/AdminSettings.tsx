@@ -10,23 +10,17 @@ export function AdminSettings() {
   const navigate = useNavigate();
   const [loading, setLoading] = React.useState(true);
   const [initialValues, setInitialValues] = React.useState<SettingsValues | null>(null);
+  const [connections, setConnections] = React.useState<Record<string, boolean>>({});
 
   React.useEffect(() => {
     async function fetchSettings() {
       try {
-        const data = await apiRequest<{ settings: Record<string, string> }>(endpoints.adminSettings);
+        const [data, connData] = await Promise.all([
+          apiRequest<{ settings: Record<string, string> }>(endpoints.adminSettings),
+          apiRequest<Record<string, { connected: boolean }>>(endpoints.adminSettingsApiKeys).catch(() => ({} as Record<string, { connected: boolean }>)),
+        ]);
         const s = data.settings || {};
         setInitialValues({
-          instagramToken: s.instagram_token || s.INSTAGRAM_ACCESS_TOKEN || '',
-          instagramUserId: s.instagram_user_id || s.INSTAGRAM_IG_USER_ID || '',
-          facebookAppId: s.facebook_app_id || s.FACEBOOK_APP_ID || '',
-          facebookAppSecret: s.facebook_app_secret || s.FACEBOOK_APP_SECRET || '',
-          facebookPageId: s.facebook_page_id || s.FACEBOOK_PAGE_ID || '',
-          whatsappToken: s.whatsapp_token || s.WHATSAPP_TOKEN || '',
-          whatsappPhoneId: s.whatsapp_phone_id || s.WHATSAPP_PHONE_NUMBER_ID || '',
-          openaiKey: s.openai_key || s.OPENAI_API_KEY || '',
-          groqKey: s.groq_key || s.GROQ_API_KEY || '',
-          llmModel: s.llm_model || s.LLM_MODEL || 'gpt-4o-mini',
           stripeSecret: s.stripe_secret || s.STRIPE_SECRET_KEY || '',
           stripeWebhookUrl: s.stripe_webhook_url || s.STRIPE_WEBHOOK_SECRET || '',
           costStandardPost: Number(s.cost_standard_post) || 1,
@@ -36,6 +30,9 @@ export function AdminSettings() {
           voiceTranscription: s.cost_voice_transcription || 'Free',
           captionEditing: s.cost_caption_editing || 'Free',
         });
+        setConnections({
+          stripe: connData?.stripe?.connected || false,
+        });
       } catch (err) {
         if (err instanceof ApiError && err.status === 401) {
           setAuthToken(null);
@@ -43,7 +40,6 @@ export function AdminSettings() {
           navigate('/admin/login');
           return;
         }
-        // use defaults
       } finally {
         setLoading(false);
       }
@@ -54,16 +50,6 @@ export function AdminSettings() {
   const save = async (values: SettingsValues) => {
     try {
       const settingsMap: Record<string, string | number> = {
-        instagram_token: values.instagramToken || '',
-        instagram_user_id: values.instagramUserId || '',
-        facebook_app_id: values.facebookAppId || '',
-        facebook_app_secret: values.facebookAppSecret || '',
-        facebook_page_id: values.facebookPageId || '',
-        whatsapp_token: values.whatsappToken || '',
-        whatsapp_phone_id: values.whatsappPhoneId || '',
-        openai_key: values.openaiKey || '',
-        groq_key: values.groqKey || '',
-        llm_model: values.llmModel || '',
         stripe_secret: values.stripeSecret || '',
         stripe_webhook_url: values.stripeWebhookUrl || '',
         cost_standard_post: values.costStandardPost,
@@ -77,7 +63,7 @@ export function AdminSettings() {
         method: 'PUT',
         body: JSON.stringify(settingsMap),
       });
-      notify.success('Settings saved', 'Integration credentials updated.');
+      notify.success('Settings saved', 'Token economics and Stripe updated.');
     } catch (err) {
       notify.error('Failed to save settings', (err as Error).message);
     }
@@ -85,13 +71,19 @@ export function AdminSettings() {
 
   return (
     <AdminLayout>
-      <AdminHeader title="Settings" description="Integration credentials and token economics." />
+      <AdminHeader title="Settings" description="Token economics and Stripe billing configuration." />
       {loading ? (
         <div className="space-y-4">
-          {[1,2,3,4].map(i => <div key={i} className="h-20 rounded-xl bg-slate-100 animate-pulse" />)}
+          {[1, 2, 3].map((i) => (
+            <div key={i} className="h-20 rounded-xl bg-slate-100 animate-pulse dark:bg-slate-800" />
+          ))}
         </div>
       ) : (
-        <SettingsForm initial={initialValues} onSave={save} />
+        <SettingsForm
+          initial={initialValues}
+          onSave={save}
+          connections={connections}
+        />
       )}
     </AdminLayout>
   );

@@ -2,8 +2,15 @@ import { randomUUID } from 'node:crypto'
 import { config } from '../config.js'
 import { fetchWithRetry } from './http.js'
 import { logger } from './logger.js'
+import { metaConfig } from './metaConfig.js'
 
-const BASE = `https://graph.facebook.com/${config.instagram.apiVersion}`
+function getBaseUrl(): string {
+  return `https://graph.facebook.com/${metaConfig.getInstagramApiVersion()}`
+}
+
+function getFallbackToken(): string {
+  return config.instagram.accessToken || ''
+}
 
 export class CancelledPublishError extends Error {
   constructor() {
@@ -13,7 +20,7 @@ export class CancelledPublishError extends Error {
 }
 
 async function igGet(url: string, accessToken?: string): Promise<Record<string, unknown>> {
-  const token = accessToken || config.instagram.accessToken
+  const token = accessToken || getFallbackToken()
   const res = await fetchWithRetry(url, {
     headers: { Authorization: `Bearer ${token}` },
   })
@@ -23,7 +30,7 @@ async function igGet(url: string, accessToken?: string): Promise<Record<string, 
 }
 
 async function igPost(url: string, body: Record<string, unknown>, accessToken?: string): Promise<Record<string, unknown>> {
-  const token = accessToken || config.instagram.accessToken
+  const token = accessToken || getFallbackToken()
   const res = await fetchWithRetry(url, {
     method: 'POST',
     headers: {
@@ -42,7 +49,7 @@ function waitForContainer(
   opts: { shouldCancel?: () => boolean; timeoutMs?: number; accessToken?: string; igUserId?: string } = {},
 ): Promise<void> {
   const timeoutMs = opts.timeoutMs ?? 120_000
-  const token = opts.accessToken || config.instagram.accessToken
+  const token = opts.accessToken || getFallbackToken()
   return new Promise((resolve, reject) => {
     const start = Date.now()
     const poll = async () => {
@@ -57,7 +64,7 @@ function waitForContainer(
       }
       try {
         const status = await igGet(
-          `${BASE}/${containerId}?fields=status_code&access_token=${token}`,
+          `${getBaseUrl()}/${containerId}?fields=status_code&access_token=${token}`,
           token
         )
         const code = (status.status_code as string) ?? ''
@@ -89,7 +96,7 @@ export async function publishImage(
   callbacks: PublishCallbacks = {},
   options: { accessToken?: string; igUserId?: string } = {},
 ): Promise<PublishResult> {
-  const token = options.accessToken || config.instagram.accessToken
+  const token = options.accessToken || getFallbackToken()
   const igUserId = options.igUserId || config.instagram.igUserId
   const isMock = config.dev.enabled && (!igUserId || !token || token.startsWith('dev_'))
   if (isMock) {
@@ -113,7 +120,7 @@ export async function publishImage(
   }
   if (publishAt) containerBody.published_at = publishAt
 
-  const container = await igPost(`${BASE}/${igUserId}/media`, containerBody, token)
+  const container = await igPost(`${getBaseUrl()}/${igUserId}/media`, containerBody, token)
   const containerId = container.id as string
   if (!containerId) throw new Error('No container id returned')
 
@@ -123,13 +130,13 @@ export async function publishImage(
 
   callbacks.onBeforePublish?.()
 
-  const publish = await igPost(`${BASE}/${igUserId}/media_publish`, {
+  const publish = await igPost(`${getBaseUrl()}/${igUserId}/media_publish`, {
     creation_id: containerId,
   }, token)
 
   const mediaId = publish.id as string
 
-  const mediaInfo = await igGet(`${BASE}/${mediaId}?fields=permalink&access_token=${token}`, token)
+  const mediaInfo = await igGet(`${getBaseUrl()}/${mediaId}?fields=permalink&access_token=${token}`, token)
   const permalink = (mediaInfo.permalink as string) ?? `https://www.instagram.com/p/${mediaId}/`
 
   return { mediaId, permalink }

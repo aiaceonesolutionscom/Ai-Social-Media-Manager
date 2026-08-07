@@ -9,7 +9,7 @@ import { generateImage } from '../src/lib/image.js'
 import { sendImage, sendText, sendReplyButtons } from '../src/lib/whatsapp.js'
 import { transcribeAudio } from '../src/lib/stt.js'
 import type { AgentDecision, WrittenContent } from '../src/types.js'
-import { PHONE, IMAGE_BUFFER, makeTextPayload, makeButtonPayload, makeAudioPayload, waitForStatus } from './helpers.js'
+import { PHONE, IMAGE_BUFFER, makeTextPayload, makeButtonPayload, makeAudioPayload, waitForStatus, registerTestUser } from './helpers.js'
 
 const chatJsonMock = vi.mocked(chatJson)
 const generateFullDraftMock = vi.mocked(generateFullDraft)
@@ -86,6 +86,7 @@ describe('Scenario 1 — natural WhatsApp conversation to published Instagram po
   beforeEach(async () => {
     vi.clearAllMocks()
     await resetStore()
+    await registerTestUser()
     chatJsonMock.mockResolvedValue({ action: 'unclear', reply: 'Please rephrase.' })
     generateFullDraftMock.mockResolvedValue(draft() as never)
     brandCheckMock.mockResolvedValue({ passed: true, grammar: 'PASS', brandVoice: 'PASS', copyright: 'PASS', policy: 'PASS' })
@@ -158,6 +159,7 @@ describe('Scenario 4 — multiple edits keep conversation context', () => {
   beforeEach(async () => {
     vi.clearAllMocks()
     await resetStore()
+    await registerTestUser()
     chatJsonMock.mockResolvedValue({ action: 'unclear', reply: 'Please rephrase.' })
     generateFullDraftMock.mockResolvedValue(draft() as never)
     brandCheckMock.mockResolvedValue({ passed: true, grammar: 'PASS', brandVoice: 'PASS', copyright: 'PASS', policy: 'PASS' })

@@ -16,7 +16,8 @@ import { formatCurrency } from '../../utils/format';
 const FEATURE_KEY_MAP: Record<string, string> = {
   'Facebook publishing': 'facebook_publishing',
   'Instagram publishing': 'instagram_publishing',
-  'WhatsApp broadcasts': 'whatsapp_broadcasts',
+  'WhatsApp broadcasts': 'whatsapp_broadcast',
+  'Website support chat': 'web_chat',
   'Voice to post transcription': 'voice_transcription',
   'Scheduled auto-publishing': 'scheduled_publishing',
   'Full analytics dashboard': 'analytics_dashboard',

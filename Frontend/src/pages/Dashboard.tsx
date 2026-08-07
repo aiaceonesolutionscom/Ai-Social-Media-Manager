@@ -12,6 +12,7 @@ import { Modal } from '../components/ui/Modal';
 import { PostStatusBadge } from '../components/user/PostCard';
 import { PlatformStatusBadge, platformIcons } from '../components/user/PlatformStatus';
 import { UsageChart } from '../components/user/UsageChart';
+import { RequireFeature } from '../components/RequireFeature';
 import { notify } from '../components/ui/Toast';
 import { apiRequest, endpoints, getUserToken } from '../utils/api';
 import { useUserAuth } from '../contexts/UserAuthContext';
@@ -32,10 +33,7 @@ export function Dashboard() {
 
   React.useEffect(() => {
     if (authLoading) return;
-    if (!isAuthenticated) {
-      navigate('/login');
-      return;
-    }
+    if (!isAuthenticated) return;
 
     async function fetchData() {
       try {
@@ -52,18 +50,40 @@ export function Dashboard() {
           })));
         }
 
-        // Fetch connected social accounts
-        const accounts = await apiRequest<any[]>(endpoints.socialAccounts);
-        const platformList = [
-          { id: 'instagram', name: 'Instagram', status: 'disconnected' },
-          { id: 'facebook', name: 'Facebook', status: 'disconnected' },
-          { id: 'whatsapp', name: 'WhatsApp', status: 'disconnected' },
+        // Fetch connected social accounts and package features
+        const [accounts, pkgData] = await Promise.all([
+          apiRequest<any[]>(endpoints.socialAccounts).catch(() => []),
+          apiRequest<{ features: Record<string, boolean> }>(endpoints.userPackage).catch(() => ({ features: {} })),
+        ]);
+
+        const features: Record<string, boolean> = (pkgData.features || {}) as Record<string, boolean>;
+        const hasAnyFeature = Object.keys(features).length > 0;
+
+        // Platform-feature mapping
+        const PLATFORM_FEATURE_MAP: Record<string, string> = {
+          facebook: 'facebook_publishing',
+          instagram: 'instagram_publishing',
+        };
+
+        const ALL_PLATFORMS = [
+          { id: 'facebook', name: 'Facebook', status: 'disconnected' as string },
+          { id: 'instagram', name: 'Instagram', status: 'disconnected' as string },
+          { id: 'whatsapp', name: 'WhatsApp', status: 'disconnected' as string },
         ];
+
+        // Filter platforms based on package features
+        const platformList = ALL_PLATFORMS.filter((p) => {
+          const featureKey = PLATFORM_FEATURE_MAP[p.id];
+          if (!featureKey) return true;
+          if (!hasAnyFeature) return true; // Show all if no features set
+          return features[featureKey] === true;
+        });
+
+        // Match connected accounts
         for (const acc of accounts) {
           const p = platformList.find(pl => pl.id === acc.platform);
           if (p) {
             p.status = acc.status || 'connected';
-            p.account = acc.accountName || acc.accountId;
           }
         }
         setPlatforms(platformList);
@@ -74,7 +94,7 @@ export function Dashboard() {
       }
     }
     fetchData();
-  }, [isAuthenticated, authLoading, navigate]);
+  }, [isAuthenticated, authLoading]);
 
   React.useEffect(() => {
     if (user) {
@@ -135,6 +155,27 @@ export function Dashboard() {
         <StatsCard label="Total posts" value={String(posts.length)} icon={FileTextIcon} tone="indigo" index={1} />
         <StatsCard label="Published" value={String(posts.filter(p => p.status === 'published').length)} icon={SendIcon} tone="emerald" index={2} />
         <StatsCard label="This month" value={String(posts.length)} icon={CalendarIcon} tone="slate" index={3} />
+      </div>
+
+      <div className="mt-6">
+        <RequireFeature phone={user?.phone || ''} feature="analytics_dashboard">
+          <Card as="section" hoverable={false}>
+            <CardHeader title="Usage overview" />
+            <UsageChart
+              data={(() => {
+                const byDate: Record<string, number> = {};
+                posts.forEach(p => {
+                  const d = p.date || 'Unknown';
+                  byDate[d] = (byDate[d] || 0) + 1;
+                });
+                const sorted = Object.entries(byDate).sort(([a], [b]) => a.localeCompare(b)).slice(-7);
+                return sorted.length > 0 ? sorted.map(([label, value]) => ({ label, value })) : [{ label: 'No data', value: 0 }];
+              })()}
+              variant="area"
+              ariaLabel="Posts usage over time"
+            />
+          </Card>
+        </RequireFeature>
       </div>
 
       <div className="mt-6 grid gap-6 lg:grid-cols-3">

@@ -1,6 +1,11 @@
 import { config } from '../config.js'
 import { fetchWithRetry } from './http.js'
 import { logger } from './logger.js'
+import { metaConfig } from './metaConfig.js'
+
+function getAdsApiVersion(): string {
+  return metaConfig.getMetaAdsApiVersion()
+}
 
 export interface AdCampaignConfig {
   name: string
@@ -26,7 +31,7 @@ export interface AdResult {
 }
 
 async function adsGet(url: string, accessToken: string): Promise<Record<string, unknown>> {
-  const fullUrl = `https://graph.facebook.com/${config.instagram.apiVersion}${url}`
+  const fullUrl = `https://graph.facebook.com/${getAdsApiVersion()}${url}`
 
   const res = await fetchWithRetry(fullUrl, {
     headers: {
@@ -44,7 +49,7 @@ async function adsGet(url: string, accessToken: string): Promise<Record<string, 
 }
 
 async function adsPost(url: string, body: Record<string, unknown>, accessToken: string): Promise<Record<string, unknown>> {
-  const fullUrl = `https://graph.facebook.com/${config.instagram.apiVersion}${url}`
+  const fullUrl = `https://graph.facebook.com/${getAdsApiVersion()}${url}`
 
   const res = await fetchWithRetry(fullUrl, {
     method: 'POST',
@@ -220,3 +225,4 @@ export async function boostPost(
 export function validateAdsConfig(): boolean {
   return !!(config.metaAds.adAccountId && config.metaAds.accessToken)
 }
+

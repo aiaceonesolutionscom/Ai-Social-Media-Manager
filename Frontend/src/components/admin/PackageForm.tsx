@@ -10,6 +10,7 @@ export const FEATURE_OPTIONS = [
 'Facebook publishing',
 'Instagram publishing',
 'WhatsApp broadcasts',
+'Website support chat',
 'Voice to post transcription',
 'Scheduled auto-publishing',
 'Full analytics dashboard',

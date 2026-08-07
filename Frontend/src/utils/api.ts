@@ -12,14 +12,10 @@ export const endpoints = {
   tokenCosts: '/api/token-costs',
   userPackage: '/api/user/package',
   checkout: '/api/checkout',
-  sendOtp: '/api/auth/send-otp',
-  verifyOtp: '/api/auth/verify-otp',
-  connect: (platform: string) => `/api/connect/${platform}`,
   posts: '/api/posts',
-  dashboard: '/api/dashboard',
-  user: (phone: string) => `/api/user/${phone}`,
-  userPosts: (phone: string) => `/api/user/${phone}/posts`,
-  userBalance: (phone: string) => `/api/user/${phone}/balance`,
+  // Chat
+  chatMessages: '/api/chat/messages',
+  chat: '/api/chat',
   // User auth
   signup: '/api/auth/signup',
   login: '/api/auth/login',
@@ -51,6 +47,22 @@ export const endpoints = {
   adminPayments: '/api/admin/payments',
   adminPaymentStats: '/api/admin/payments/stats',
   adminSettings: '/api/admin/settings',
+  adminSettingsApiKeys: '/api/admin/settings/api-keys',
+  adminSettingsTest: (integration: string) => `/api/admin/settings/test/${integration}`,
+  adminMetaSettings: '/api/admin/meta-settings',
+  adminMetaSettingsCategory: (category: string) => `/api/admin/meta-settings/${category}`,
+  adminMetaSettingsTest: '/api/admin/meta-settings/test',
+  adminMetaSettingsTestIntegration: (integration: string) => `/api/admin/meta-settings/test/${integration}`,
+  adminAIProviders: '/api/admin/ai-providers',
+  adminAIProvidersActive: '/api/admin/ai-providers/active',
+  adminAIProvidersCosts: '/api/admin/ai-providers/costs',
+  adminAIProvidersStats: '/api/admin/ai-providers/stats',
+  adminAIProvidersHistory: '/api/admin/ai-providers/history',
+  // Support
+  supportTickets: '/api/support/tickets',
+  adminSupportTickets: '/api/admin/support/tickets',
+  adminSupportTicketUpdate: (id: string) => `/api/admin/support/tickets/${id}`,
+  // Stripe
   stripeWebhook: '/webhooks/stripe',
 } as const;
 

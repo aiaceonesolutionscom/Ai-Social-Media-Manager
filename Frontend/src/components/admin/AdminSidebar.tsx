@@ -6,7 +6,9 @@ import {
   LogOutIcon,
   PackageIcon,
   SettingsIcon,
-  UsersIcon } from
+  UsersIcon,
+  BrainIcon,
+  ShieldIcon } from
 'lucide-react';
 import { Logo } from '../ui/Logo';
 import { notify } from '../ui/Toast';
@@ -18,6 +20,8 @@ const navItems = [
 { label: 'Packages', to: '/admin/packages', icon: PackageIcon },
 { label: 'Users', to: '/admin/users', icon: UsersIcon },
 { label: 'Payments', to: '/admin/payments', icon: CreditCardIcon },
+{ label: 'AI Providers', to: '/admin/ai-providers', icon: BrainIcon },
+{ label: 'Meta Platform', to: '/admin/meta-platform', icon: ShieldIcon },
 { label: 'Settings', to: '/admin/settings', icon: SettingsIcon }];
 
 
@@ -78,7 +82,7 @@ export function AdminSidebar() {
         aria-label="Admin"
         className="lg:hidden fixed bottom-0 inset-x-0 z-40 border-t border-slate-200 bg-white/95 px-1 py-2 backdrop-blur dark:border-slate-800 dark:bg-slate-900/95">
         
-        <ul className="grid grid-cols-5">
+        <ul className="grid grid-cols-7">
           {navItems.map((item) =>
           <li key={item.to}>
               <NavLink

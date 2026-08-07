@@ -34,7 +34,8 @@ interface MetaInfo {
 const FEATURE_LABELS: Record<string, string> = {
   facebook_publishing: 'Facebook publishing',
   instagram_publishing: 'Instagram publishing',
-  whatsapp_broadcasts: 'WhatsApp broadcasts',
+  whatsapp_broadcast: 'WhatsApp broadcasts',
+  web_chat: 'Website support chat',
   voice_transcription: 'Voice to post transcription',
   scheduled_publishing: 'Scheduled auto-publishing',
   analytics_dashboard: 'Full analytics dashboard',
