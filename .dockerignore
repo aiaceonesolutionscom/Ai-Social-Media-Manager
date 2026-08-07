@@ -1,0 +1,13 @@
+node_modules
+dist
+storage
+data
+.env
+*.log
+.DS_Store
+.git
+tests
+docs
+*.md
+.env.example
+drizzle

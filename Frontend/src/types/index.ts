@@ -1,0 +1,84 @@
+export type PlatformId = 'instagram' | 'facebook' | 'whatsapp';
+
+export type ConnectionStatus = 'connected' | 'disconnected' | 'pending' | 'error';
+
+export interface Platform {
+  id: PlatformId;
+  name: string;
+  description: string;
+  status: ConnectionStatus;
+  account?: string;
+}
+
+export interface PackageFeature {
+  label: string;
+  included: boolean;
+}
+
+export interface PricingPackage {
+  id: string;
+  name: string;
+  description: string;
+  price: number;
+  tokens: number;
+  popular?: boolean;
+  features: PackageFeature[];
+  status: 'active' | 'inactive';
+  users: number;
+  sortOrder: number;
+}
+
+export type PostStatus = 'published' | 'scheduled' | 'draft' | 'failed';
+
+export interface Post {
+  id: string;
+  date: string;
+  caption: string;
+  platform: PlatformId;
+  status: PostStatus;
+  tokens: number;
+}
+
+export type UserStatus = 'active' | 'inactive';
+
+export interface PlatformUser {
+  id: string;
+  phone: string;
+  name: string;
+  email: string;
+  packageName: string;
+  tokens: number;
+  status: UserStatus;
+  joined: string;
+}
+
+export interface TokenTransaction {
+  id: string;
+  date: string;
+  description: string;
+  amount: number;
+  balance: number;
+}
+
+export type PaymentStatus = 'succeeded' | 'pending' | 'refunded' | 'failed';
+
+export interface Payment {
+  id: string;
+  date: string;
+  user: string;
+  plan: string;
+  amount: number;
+  status: PaymentStatus;
+}
+
+export interface ActivityItem {
+  id: string;
+  type: 'registration' | 'post' | 'upgrade' | 'payment';
+  message: string;
+  time: string;
+}
+
+export interface ChartPoint {
+  label: string;
+  value: number;
+}
