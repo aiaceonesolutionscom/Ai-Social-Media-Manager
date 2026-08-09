@@ -6,9 +6,12 @@ import { Card } from '../components/ui/Card';
 import { DataTable, type Column } from '../components/ui/DataTable';
 import { PostStatusBadge } from '../components/user/PostCard';
 import { apiRequest, endpoints } from '../utils/api';
+import { Pagination } from '../components/ui/Pagination';
 import { useUserAuth } from '../contexts/UserAuthContext';
 import { formatDate } from '../utils/format';
 import type { PostStatus } from '../types';
+
+const PAGE_SIZE = 10;
 
 interface Post {
   id: string;
@@ -21,11 +24,12 @@ interface Post {
 
 export function PublishingHistory() {
   const navigate = useNavigate();
-  const { user, isAuthenticated, loading: authLoading } = useUserAuth();
+  const { isAuthenticated, loading: authLoading } = useUserAuth();
   const [posts, setPosts] = React.useState<Post[]>([]);
   const [loading, setLoading] = React.useState(true);
-  const [tokens, setTokens] = React.useState(0);
-  const [totalTokens, setTotalTokens] = React.useState(0);
+  const [page, setPage] = React.useState(1);
+
+  const paginated = React.useMemo(() => posts.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE), [posts, page]);
 
   React.useEffect(() => {
     if (authLoading) return;
@@ -59,13 +63,6 @@ export function PublishingHistory() {
     fetchData();
   }, [isAuthenticated, authLoading, navigate]);
 
-  React.useEffect(() => {
-    if (user) {
-      setTokens(user.tokensRemaining);
-      setTotalTokens(user.tokensRemaining + user.tokensUsed);
-    }
-  }, [user]);
-
   const columns: Array<Column<Post>> = [
     { key: 'date', header: 'Date', render: (p) => <span className="whitespace-nowrap">{formatDate(p.date)}</span> },
     {
@@ -85,7 +82,7 @@ export function PublishingHistory() {
   ];
 
   return (
-    <DashboardLayout tokens={tokens} totalTokens={totalTokens}>
+    <DashboardLayout>
       <header className="mb-8">
         <h1 className="text-2xl font-bold tracking-tight text-slate-900 dark:text-slate-50">Publishing History</h1>
         <p className="mt-1 text-sm text-slate-500">All your published and failed posts.</p>
@@ -99,13 +96,18 @@ export function PublishingHistory() {
             ))}
           </div>
         ) : (
-          <DataTable
-            columns={columns}
-            rows={posts}
-            rowKey={(p) => p.id}
-            caption="Your publishing history"
-            emptyMessage="No published posts yet."
-          />
+          <>
+            <DataTable
+              columns={columns}
+              rows={paginated}
+              rowKey={(p) => p.id}
+              caption="Your publishing history"
+              emptyMessage="No published posts yet."
+            />
+            <div className="p-6 pt-0">
+              <Pagination page={page} total={posts.length} pageSize={PAGE_SIZE} onPageChange={setPage} />
+            </div>
+          </>
         )}
       </Card>
     </DashboardLayout>

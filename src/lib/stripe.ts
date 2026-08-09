@@ -17,14 +17,20 @@ async function getStripe() {
 }
 
 export async function createCheckoutSession(params: {
-  packageId: string
+  packageId?: string
   packageName: string
   priceCents: number
   phone: string
   successUrl: string
   cancelUrl: string
+  kind?: 'package' | 'topup'
+  bundleId?: string
+  tokenCount?: number
 }): Promise<{ sessionId: string; url: string }> {
   const stripe = await getStripe()
+
+  const kind = params.kind || 'package'
+  const packageId = params.packageId || ''
 
   const session = await stripe.checkout.sessions.create({
     payment_method_types: ['card'],
@@ -33,7 +39,7 @@ export async function createCheckoutSession(params: {
         currency: 'usd',
         product_data: {
           name: params.packageName,
-          metadata: { packageId: params.packageId },
+          metadata: { packageId },
         },
         unit_amount: params.priceCents,
       },
@@ -44,7 +50,10 @@ export async function createCheckoutSession(params: {
     cancel_url: params.cancelUrl,
     metadata: {
       phone: params.phone,
-      packageId: params.packageId,
+      packageId,
+      kind,
+      ...(params.bundleId ? { bundleId: params.bundleId } : {}),
+      ...(params.tokenCount ? { tokenCount: String(params.tokenCount) } : {}),
     },
   })
 

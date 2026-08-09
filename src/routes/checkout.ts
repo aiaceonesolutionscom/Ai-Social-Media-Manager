@@ -3,6 +3,7 @@ import { config } from '../config.js'
 import { verifySession } from '../lib/userAuth.js'
 import { createCheckoutSession } from '../lib/stripe.js'
 import { getUser, getPackage, createPayment, updateUser, createTokenTransaction } from '../store.js'
+import { clearFeatureCache } from '../lib/packagePermissions.js'
 import { logger } from '../lib/logger.js'
 
 export async function registerCheckoutRoutes(server: FastifyInstance): Promise<void> {
@@ -35,6 +36,7 @@ export async function registerCheckoutRoutes(server: FastifyInstance): Promise<v
           tokensRemaining: newBalance,
           tokensUsed: user.tokensUsed,
         })
+        clearFeatureCache(session.phone)
 
         await createPayment({
           phone: session.phone,

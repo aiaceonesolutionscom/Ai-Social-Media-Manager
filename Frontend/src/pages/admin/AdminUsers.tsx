@@ -13,8 +13,12 @@ import { DataTable, type Column } from '../../components/ui/DataTable';
 import { PostStatusBadge } from '../../components/user/PostCard';
 import { notify } from '../../components/ui/Toast';
 import { apiRequest, endpoints, ApiError, setAuthToken } from '../../utils/api';
+import { Pagination } from '../../components/ui/Pagination';
 import type { PlatformUser, Post, TokenTransaction } from '../../types';
 import { formatDate } from '../../utils/format';
+import { useAuth } from '../../contexts/AuthContext';
+
+const PAGE_SIZE = 10;
 
 function fromApiUser(u: any): PlatformUser {
   return {
@@ -43,12 +47,15 @@ const transactionColumns: Array<Column<TokenTransaction>> = [
 
 export function AdminUsers() {
   const navigate = useNavigate();
+  const { hasPermission } = useAuth();
   const [users, setUsers] = React.useState<PlatformUser[]>([]);
   const [loading, setLoading] = React.useState(true);
   const [query, setQuery] = React.useState('');
+  const [page, setPage] = React.useState(1);
   const [selected, setSelected] = React.useState<PlatformUser | null>(null);
   const [grantOpen, setGrantOpen] = React.useState(false);
   const [createOpen, setCreateOpen] = React.useState(false);
+  const [pendingDelete, setPendingDelete] = React.useState<PlatformUser | null>(null);
   const [userTransactions, setUserTransactions] = React.useState<TokenTransaction[]>([]);
   const [packages, setPackages] = React.useState<Array<{ id: string; name: string; tokens: number }>>([]);
 
@@ -89,6 +96,16 @@ export function AdminUsers() {
     );
   }, [users, query]);
 
+  const paginated = React.useMemo(
+    () => filtered.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE),
+    [filtered, page]
+  );
+
+  const onQueryChange = (value: string) => {
+    setQuery(value);
+    setPage(1);
+  };
+
   const toggleStatus = async (user: PlatformUser) => {
     try {
       if (user.status === 'active') {
@@ -101,6 +118,19 @@ export function AdminUsers() {
       await fetchUsers();
     } catch (err) {
       notify.error('Failed to update user', (err as Error).message);
+    }
+  };
+
+  const deleteUser = async () => {
+    if (!pendingDelete) return;
+    try {
+      await apiRequest(endpoints.adminUserDelete(pendingDelete.phone), { method: 'DELETE' });
+      notify.success('User deleted', `${pendingDelete.name} was removed`);
+      setPendingDelete(null);
+      setSelected(null);
+      await fetchUsers();
+    } catch (err) {
+      notify.error('Failed to delete user', (err as Error).message);
     }
   };
 
@@ -162,9 +192,11 @@ export function AdminUsers() {
         title="User Management"
         description={`${users.length} registered accounts.`}
         action={
-          <Button onClick={() => setCreateOpen(true)}>
-            <PlusIcon className="h-4 w-4" aria-hidden="true" /> Create user
-          </Button>
+          hasPermission('users.create') ? (
+            <Button onClick={() => setCreateOpen(true)}>
+              <PlusIcon className="h-4 w-4" aria-hidden="true" /> Create user
+            </Button>
+          ) : undefined
         }
       />
 
@@ -172,7 +204,7 @@ export function AdminUsers() {
         <label htmlFor="user-search" className="sr-only">Search users</label>
         <div className="relative">
           <SearchIcon className="pointer-events-none absolute left-3.5 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" aria-hidden="true" />
-          <input id="user-search" type="search" value={query} onChange={(e) => setQuery(e.target.value)}
+          <input id="user-search" type="search" value={query} onChange={(e) => onQueryChange(e.target.value)}
             placeholder="Search by name, phone, email or package"
             className="h-11 w-full rounded-xl border border-slate-200 bg-white pl-10 pr-3.5 text-sm text-slate-900 placeholder:text-slate-400 focus:border-indigo-500 focus:ring-2 focus:ring-indigo-100 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100" />
         </div>
@@ -183,17 +215,27 @@ export function AdminUsers() {
           {[1,2,3].map(i => <div key={i} className="h-16 rounded-xl bg-slate-100 animate-pulse" />)}
         </div>
       ) : (
-        <UserTable users={filtered} onView={viewUser} onToggleStatus={toggleStatus} />
+        <>
+          <UserTable users={paginated} onView={viewUser} onToggleStatus={toggleStatus} onDelete={setPendingDelete} />
+          <Pagination page={page} total={filtered.length} pageSize={PAGE_SIZE} onPageChange={setPage} />
+        </>
       )}
 
       <Modal open={selected !== null && !grantOpen} onClose={() => setSelected(null)} title={selected?.name ?? 'User'}
         description={selected?.email} size="xl"
         footer={selected && (
           <>
-            <Button variant="secondary" onClick={() => setGrantOpen(true)}>Grant tokens</Button>
-            <Button variant={selected.status === 'active' ? 'danger' : 'primary'} onClick={() => toggleStatus(selected)}>
-              {selected.status === 'active' ? 'Deactivate' : 'Reactivate'}
-            </Button>
+            {hasPermission('users.update') && (
+              <Button variant="secondary" onClick={() => setGrantOpen(true)}>Grant tokens</Button>
+            )}
+            {hasPermission('users.update') && (
+              <Button variant={selected.status === 'active' ? 'danger' : 'primary'} onClick={() => toggleStatus(selected)}>
+                {selected.status === 'active' ? 'Deactivate' : 'Reactivate'}
+              </Button>
+            )}
+            {hasPermission('users.delete') && (
+              <Button variant="danger" onClick={() => setPendingDelete(selected)}>Delete user</Button>
+            )}
           </>
         )}>
         {selected && (
@@ -237,6 +279,24 @@ export function AdminUsers() {
 
       <Modal open={createOpen} onClose={() => setCreateOpen(false)} title="Create user" description="Add a new user to the platform." size="lg">
         <CreateUserForm packages={packages} onSubmit={createUser} onCancel={() => setCreateOpen(false)} />
+      </Modal>
+
+      <Modal
+        open={pendingDelete !== null}
+        onClose={() => setPendingDelete(null)}
+        title="Delete user?"
+        description="This removes the account and all remaining tokens."
+        size="md"
+        footer={
+          <>
+            <Button variant="secondary" onClick={() => setPendingDelete(null)}>Cancel</Button>
+            <Button variant="danger" onClick={deleteUser}>Delete user</Button>
+          </>
+        }>
+        <p className="text-sm text-slate-600 dark:text-slate-300">
+          Are you sure you want to delete <span className="font-semibold">{pendingDelete?.name}</span> ({pendingDelete?.email || pendingDelete?.phone})?
+          This action cannot be undone.
+        </p>
       </Modal>
     </AdminLayout>
   );

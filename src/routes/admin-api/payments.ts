@@ -1,15 +1,16 @@
 import { FastifyInstance } from 'fastify'
 import { listPayments, getPayment, updatePayment } from '../../store.js'
+import { guard } from './middleware.js'
 
 export async function registerAdminPaymentRoutes(server: FastifyInstance): Promise<void> {
 
-  server.get('/api/admin/payments', async (req: any, reply: any) => {
+  server.get('/api/admin/payments', guard('payments.view'), async (req: any, reply: any) => {
     const phone = (req.query as any)?.phone as string | undefined
     const payments = await listPayments(phone)
     return reply.send({ payments })
   })
 
-  server.get('/api/admin/payments/:id', async (req: any, reply: any) => {
+  server.get('/api/admin/payments/:id', guard('payments.view'), async (req: any, reply: any) => {
     const { id } = req.params as { id: string }
     const payment = await getPayment(id)
     if (!payment) {
@@ -18,7 +19,7 @@ export async function registerAdminPaymentRoutes(server: FastifyInstance): Promi
     return reply.send({ payment })
   })
 
-  server.put('/api/admin/payments/:id', async (req: any, reply: any) => {
+  server.put('/api/admin/payments/:id', guard('payments.view'), async (req: any, reply: any) => {
     const { id } = req.params as { id: string }
     const patch = req.body as Partial<{ status: string }>
 
@@ -30,7 +31,7 @@ export async function registerAdminPaymentRoutes(server: FastifyInstance): Promi
     }
   })
 
-  server.get('/api/admin/payments/stats', async (req: any, reply: any) => {
+  server.get('/api/admin/payments/stats', guard('payments.view'), async (req: any, reply: any) => {
     const payments = await listPayments()
     const completed = payments.filter(p => p.status === 'completed')
     const totalRevenue = completed.reduce((sum, p) => sum + p.amountCents, 0)

@@ -62,6 +62,9 @@ export async function sendAccessDenied(phone: string, reason: string): Promise<v
     case 'no_tokens':
       message = '🚫 No tokens remaining. Please upgrade your plan or buy more tokens.'
       break
+    case 'no_whatsapp':
+      message = '⛔ Your current package does not include the WhatsApp channel. Please upgrade your plan, or use the web dashboard chat to manage your posts.'
+      break
     default:
       message = '⛔ Access denied. Please contact admin.'
   }

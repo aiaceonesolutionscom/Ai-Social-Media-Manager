@@ -4,8 +4,10 @@ import { fullCaption, platformCaption } from '../lib/caption.js'
 import { sendImage, sendReplyButtons, sendText, localFileUrl } from '../lib/whatsapp.js'
 import { generateImage } from '../lib/image.js'
 import { saveImageBuffer } from '../storage.js'
+import { applyBrandLogo } from '../lib/branding.js'
 import { brandCheck, generateFullDraft, generateImagePrompt, planEdit } from './generate.js'
-import { cancelPublish, enqueuePublish } from './publish.js'
+import { cancelPublish, enqueuePublish, schedulePost, parseScheduleTime } from './publish.js'
+import { checkPackageFeature } from '../lib/packagePermissions.js'
 import { handleAdConversation } from './adConversation.js'
 import { isUrl, normalizeUrl, analyzeWebsite, type WebsiteAnalysis } from '../lib/urlAnalyzer.js'
 import {
@@ -30,6 +32,7 @@ interface PlatformInfo {
   primaryLabel: string
   allLabel: string
   hasAdCampaigns: boolean
+  hasPublishing: boolean
 }
 
 async function getPlatformInfo(phone: string): Promise<PlatformInfo> {
@@ -46,7 +49,7 @@ async function getPlatformInfo(phone: string): Promise<PlatformInfo> {
   const allLabel = platforms.length > 1 ? 'social media' : (platforms.length === 1 ? primary : 'social media')
   const hasAdCampaigns = features.ad_campaigns === true
 
-  return { platforms, primaryLabel: primary, allLabel, hasAdCampaigns }
+  return { platforms, primaryLabel: primary, allLabel, hasAdCampaigns, hasPublishing: platforms.length > 0 }
 }
 
 const CORE_SYSTEM = `You are a professional social media manager chatting on WhatsApp.
@@ -94,13 +97,15 @@ ${await historyBlock(phone)}
 
 Decide the user's intended action from their latest message. Return ONLY a JSON object:
 {
-  "action": "smalltalk" | "ask_question" | "generate_post" | "edit_request" | "approve" | "regenerate" | "cancel_publish" | "new_post" | "create_ad" | "unclear",
+  "action": "smalltalk" | "ask_question" | "generate_post" | "edit_request" | "approve" | "regenerate" | "cancel_publish" | "new_post" | "create_ad" | "schedule_post" | "unclear",
   "reply": "a short, natural response to send (optional)",
   "question": "the single next question to ask (only for ask_question)",
   "intent": { "topic": "", "audience": "", "tone": "", "goal": "", "language": "", "emotion": "" },
-  "editRequest": "a concise paraphrase of the requested edit (only for edit_request)"
+  "editRequest": "a concise paraphrase of the requested edit (only for edit_request)",
+  "scheduleAt": "the time the user wants the draft published (only for schedule_post), e.g. an absolute timestamp, 'in 2 hours', 'tomorrow at 5pm', or '5:00 PM'"
 }
 Use "create_ad" when the user wants to run ads, promote something, create a campaign, or boost a post.
+Use "schedule_post" when the user wants to publish the current draft later (e.g. "schedule for 3pm", "publish tomorrow at 5", "post in 2 hours"). Output the requested time in scheduleAt.
 Fill as many intent fields as you can infer from context and history. Never guess fields you cannot infer.`
 }
 
@@ -184,12 +189,18 @@ export async function sendPreview(phone: string, post: Post): Promise<void> {
 async function runPipeline(phone: string, postId: string, sourceText: string, intentOverride?: Partial<Intent> | Intent): Promise<void> {
   const post = (await getPost(postId))!
   const prefs = await getUserPreferences(phone)
-  const brand = await getBrandProfile(phone)
+  const brandProfile = await getBrandProfile(phone)
+  const hasBranding = await checkPackageFeature(phone, 'custom_branding')
+  const brand = hasBranding ? brandProfile : undefined
   await setConversation(phone, { kind: 'generating', postId })
   try {
     const fullIntent = intentOverride && intentOverride.topic ? (intentOverride as unknown as Intent) : undefined
     await setStage(postId, 'INTENT')
-    const draft = await generateFullDraft(post, sourceText, fullIntent ? { intent: fullIntent, preferences: prefs } : { preferences: prefs })
+    const draft = await generateFullDraft(post, sourceText, {
+      intent: fullIntent,
+      preferences: prefs,
+      brandProfile: brand,
+    })
     await setStage(postId, 'WRITTEN', {
       transcript: sourceText,
       intent: draft.intent,
@@ -208,7 +219,10 @@ async function runPipeline(phone: string, postId: string, sourceText: string, in
 
     await setStage(postId, 'IMAGE')
     const imgPost = (await getPost(postId))!
-    const imageBuffer = await safeGenerateImage(imgPost.imagePrompt!)
+    let imageBuffer = await safeGenerateImage(imgPost.imagePrompt!)
+    if (hasBranding && (brand as any)?.logoPath) {
+      imageBuffer = await applyBrandLogo(imageBuffer, (brand as any).logoPath)
+    }
     const relPath = saveImageBuffer(imageBuffer, postId)
     const url = localFileUrl(relPath)
     await setStage(postId, 'IMAGE', { imagePath: relPath, imageUrl: url })
@@ -227,13 +241,31 @@ async function runPipeline(phone: string, postId: string, sourceText: string, in
   }
 }
 
+async function handleSchedule(phone: string, postId: string, rawTime: string | undefined): Promise<void> {
+  const hasSchedule = await checkPackageFeature(phone, 'scheduled_publishing')
+  if (!hasSchedule) {
+    await safeSend(phone, '❌ Scheduled publishing is not included in your current plan. Please upgrade your package to use this feature.')
+    return
+  }
+  const iso = rawTime ? parseScheduleTime(rawTime) : null
+  if (!iso) {
+    await safeSend(phone, '🕐 Sure! What time should I publish it? For example: "in 2 hours", "tomorrow at 5pm", or "5:00 PM".')
+    return
+  }
+  await schedulePost(postId, phone, iso)
+  const when = new Date(iso).toLocaleString()
+  await safeSend(phone, `✅ Scheduled! Your post will be published automatically on ${when}.`)
+}
+
 async function handleEdit(phone: string, postId: string, editRequest: string): Promise<void> {
   const post = await getPost(postId)
   if (!post || !post.content) {
     await safeSend(phone, "I don't have a draft to edit yet. Tell me what to create first.")
     return
   }
-  const brand = await getBrandProfile(phone)
+  const brandProfile = await getBrandProfile(phone)
+  const hasBranding = await checkPackageFeature(phone, 'custom_branding')
+  const brand = hasBranding ? brandProfile : undefined
   await setConversation(phone, { kind: 'generating', postId })
   await safeSend(phone, '✏️ Applying your edit...')
   try {
@@ -263,7 +295,10 @@ async function handleEdit(phone: string, postId: string, editRequest: string): P
     if (decision.scope === 'image' || decision.imagePrompt) {
       const prompt = decision.imagePrompt ?? (await generateImagePrompt(post.intent?.topic ?? '', finalContent.caption))
       await setStage(postId, 'IMAGE')
-      const imageBuffer = await safeGenerateImage(prompt)
+      let imageBuffer = await safeGenerateImage(prompt)
+      if (hasBranding && (brand as any)?.logoPath) {
+        imageBuffer = await applyBrandLogo(imageBuffer, (brand as any).logoPath)
+      }
       const relPath = saveImageBuffer(imageBuffer, postId)
       const url = localFileUrl(relPath)
       await setStage(postId, 'IMAGE', { imagePath: relPath, imageUrl: url, imagePrompt: prompt })
@@ -311,9 +346,21 @@ export async function handleUserInput(
     return
   }
 
+  // Only generate posts when the package includes a publishing platform.
+  async function ensureCanPublish(): Promise<boolean> {
+    if (pi.hasPublishing) return true
+    if (pi.hasAdCampaigns) {
+      await safeSend(phone, '❌ Post publishing is not included in your current plan, but **Meta Ads** is. Say "create an ad" or visit your dashboard to start an ad campaign.')
+    } else {
+      await safeSend(phone, '❌ Your package does not include any publishing platform. Please upgrade your package to publish posts.')
+    }
+    return false
+  }
+
   if (conv.kind === 'idle') {
     // Check if user sent a URL - analyze and generate content
     if (isUrl(content)) {
+      if (!(await ensureCanPublish())) return
       const url = normalizeUrl(content)
       await safeSend(phone, '🔍 Analyzing your website... This may take a moment.')
       try {
@@ -343,6 +390,7 @@ export async function handleUserInput(
 
     const d = await classify(phone, `No draft in progress. The user may want to start a new ${pi.allLabel} post or just chat.`, undefined, content)
     if (d.action === 'generate_post') {
+      if (!(await ensureCanPublish())) return
       const postId = (await createPost(phone)).id
       await setConversation(phone, { kind: 'generating', postId })
       await safeSend(phone, 'Great! Let me create that for you. 🎨')
@@ -407,6 +455,8 @@ export async function handleUserInput(
       await setConversation(phone, { kind: 'generating', postId: conv.postId })
       await safeSend(phone, '🔄 Regenerating your post...')
       await runPipeline(phone, conv.postId, post.transcript ?? post.content!.caption, undefined)
+    } else if (d.action === 'schedule_post') {
+      await handleSchedule(phone, conv.postId, d.scheduleAt || content)
     } else {
       await safeSend(phone, d.reply ?? "Here's your draft. Reply Approve to publish, or tell me what to change.")
     }

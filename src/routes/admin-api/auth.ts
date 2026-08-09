@@ -1,5 +1,5 @@
 import { FastifyInstance } from 'fastify'
-import { adminLogin, verifyAdminToken, adminLogout } from '../../lib/adminAuth.js'
+import { adminLogin, verifyAdminToken, adminLogout, allPermissionKeys } from '../../lib/adminAuth.js'
 import { rateLimit } from '../../lib/ratelimit.js'
 
 export async function registerAdminAuthRoutes(server: FastifyInstance): Promise<void> {
@@ -37,6 +37,11 @@ export async function registerAdminAuthRoutes(server: FastifyInstance): Promise<
       return reply.status(401).send({ error: 'Unauthorized' })
     }
 
-    return reply.send({ email: result.email })
+    return reply.send({
+      email: result.email,
+      name: result.name,
+      role: result.role,
+      permissions: result.role === 'super_admin' ? allPermissionKeys() : (result.permissions || []),
+    })
   })
 }

@@ -7,6 +7,7 @@ interface User {
   name: string;
   email: string;
   packageId: string;
+  packageName?: string;
   tokensRemaining: number;
   tokensUsed: number;
   avatarUrl?: string;
@@ -49,7 +50,7 @@ export function UserAuthProvider({ children }: { children: React.ReactNode }) {
     }
 
     try {
-      const data = await apiRequest<{ phone: string; name: string; email: string; packageId: string; tokensRemaining: number; tokensUsed: number; avatarUrl?: string; oauthProvider?: string }>(endpoints.userMe, {
+      const data = await apiRequest<{ phone: string; name: string; email: string; packageId: string; packageName?: string; tokensRemaining: number; tokensUsed: number; avatarUrl?: string; oauthProvider?: string }>(endpoints.userMe, {
         headers: { Authorization: `Bearer ${token}` },
       });
       setUser(data);

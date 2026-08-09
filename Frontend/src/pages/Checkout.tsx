@@ -10,6 +10,7 @@ import { notify } from '../components/ui/Toast';
 import { apiRequest, endpoints } from '../utils/api';
 import { useUserAuth } from '../contexts/UserAuthContext';
 import { formatCurrency } from '../utils/format';
+import { buildFeatureList } from '../utils/features';
 import type { PricingPackage } from '../types';
 
 function toPkg(pkg: any): PricingPackage {
@@ -19,10 +20,7 @@ function toPkg(pkg: any): PricingPackage {
     id: pkg.slug || pkg.id,
     price: Number(pkg.priceCents) / 100,
     tokens: pkg.includedTokens,
-    features: Object.entries(FEATURE_LABELS).map(([key, label]) => ({
-      label,
-      included: features[key] === true,
-    })),
+    features: buildFeatureList(features),
   };
 }
 
@@ -31,22 +29,11 @@ interface MetaInfo {
   integrations: Record<string, boolean>;
 }
 
-const FEATURE_LABELS: Record<string, string> = {
-  facebook_publishing: 'Facebook publishing',
-  instagram_publishing: 'Instagram publishing',
-  whatsapp_broadcast: 'WhatsApp broadcasts',
-  web_chat: 'Website support chat',
-  voice_transcription: 'Voice to post transcription',
-  scheduled_publishing: 'Scheduled auto-publishing',
-  analytics_dashboard: 'Full analytics dashboard',
-  priority_support: 'Priority support',
-};
-
 const fallbackPackages: PricingPackage[] = [
-  { id: 'facebook-only', name: 'Facebook Only', description: 'Perfect for Facebook-only presence', price: 5, tokens: 15, status: 'active', users: 0, sortOrder: 0, features: [{ label: 'Facebook publishing', included: true }, { label: 'Instagram publishing', included: false }] },
-  { id: 'starter', name: 'Starter', description: 'Get started with social media', price: 15, tokens: 100, status: 'active', users: 0, sortOrder: 1, features: [{ label: 'Facebook publishing', included: true }, { label: 'Instagram publishing', included: true }] },
-  { id: 'pro', name: 'Pro', description: 'For growing businesses', popular: true, price: 29, tokens: 1000, status: 'active', users: 0, sortOrder: 2, features: [{ label: 'Facebook publishing', included: true }, { label: 'Instagram publishing', included: true }] },
-  { id: 'exclusive', name: 'Exclusive', description: 'For agencies', price: 99, tokens: 3000, status: 'active', users: 0, sortOrder: 3, features: [{ label: 'Facebook publishing', included: true }, { label: 'Instagram publishing', included: true }] },
+  { id: 'facebook-only', name: 'Facebook Only', description: 'Perfect for Facebook-only presence', price: 5, tokens: 15, status: 'active', users: 0, sortOrder: 0, features: buildFeatureList({ facebook_publishing: true, instagram_publishing: false, whatsapp_broadcast: false, web_chat: false, voice_transcription: true, scheduled_publishing: false, analytics_dashboard: false, priority_support: false, ad_campaigns: false, custom_branding: false }) },
+  { id: 'starter', name: 'Starter', description: 'Get started with social media', price: 15, tokens: 100, status: 'active', users: 0, sortOrder: 1, features: buildFeatureList({ facebook_publishing: true, instagram_publishing: true, whatsapp_broadcast: false, web_chat: false, voice_transcription: true, scheduled_publishing: false, analytics_dashboard: true, priority_support: false, ad_campaigns: false, custom_branding: false }) },
+  { id: 'pro', name: 'Pro', description: 'For growing businesses', popular: true, price: 29, tokens: 1000, status: 'active', users: 0, sortOrder: 2, features: buildFeatureList({ facebook_publishing: true, instagram_publishing: true, whatsapp_broadcast: true, web_chat: true, voice_transcription: true, scheduled_publishing: true, analytics_dashboard: true, priority_support: true, ad_campaigns: true, custom_branding: false }) },
+  { id: 'exclusive', name: 'Exclusive', description: 'For agencies', price: 99, tokens: 3000, status: 'active', users: 0, sortOrder: 3, features: buildFeatureList({ facebook_publishing: true, instagram_publishing: true, whatsapp_broadcast: true, web_chat: true, voice_transcription: true, scheduled_publishing: true, analytics_dashboard: true, priority_support: true, ad_campaigns: true, custom_branding: true }) },
 ];
 
 interface CardState {

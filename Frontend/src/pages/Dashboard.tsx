@@ -1,20 +1,19 @@
 import React from 'react';
 import { useNavigate } from 'react-router-dom';
 import {
-  ArrowUpRightIcon, CalendarIcon, CoinsIcon, ExternalLinkIcon, FileTextIcon, SendIcon, Trash2Icon
+  BookOpenIcon, CalendarIcon, CoinsIcon, ExternalLinkIcon, FileTextIcon, MessageCircleIcon, SendIcon, SparklesIcon, XIcon
 } from 'lucide-react';
 import { DashboardLayout } from '../components/layout/DashboardLayout';
 import { StatsCard } from '../components/ui/StatsCard';
 import { Card, CardHeader } from '../components/ui/Card';
 import { Button } from '../components/ui/Button';
 import { DataTable, type Column } from '../components/ui/DataTable';
-import { Modal } from '../components/ui/Modal';
 import { PostStatusBadge } from '../components/user/PostCard';
 import { PlatformStatusBadge, platformIcons } from '../components/user/PlatformStatus';
 import { UsageChart } from '../components/user/UsageChart';
 import { RequireFeature } from '../components/RequireFeature';
 import { notify } from '../components/ui/Toast';
-import { apiRequest, endpoints, getUserToken } from '../utils/api';
+import { apiRequest, endpoints } from '../utils/api';
 import { useUserAuth } from '../contexts/UserAuthContext';
 import type { Post } from '../types';
 import { formatDate } from '../utils/format';
@@ -26,10 +25,27 @@ export function Dashboard() {
   const { user, isAuthenticated, loading: authLoading } = useUserAuth();
   const [posts, setPosts] = React.useState<Post[]>(fallbackPosts);
   const [platforms, setPlatforms] = React.useState<Array<{ id: string; name: string; status: string; account?: string }>>([]);
-  const [pendingDelete, setPendingDelete] = React.useState<Post | null>(null);
   const [tokens, setTokens] = React.useState(0);
   const [totalTokens, setTotalTokens] = React.useState(0);
   const [loading, setLoading] = React.useState(true);
+
+  const gettingStartedKey = `echopost_getting_started_${user?.phone || 'anon'}`;
+  const [showGettingStarted, setShowGettingStarted] = React.useState(() => {
+    try {
+      return localStorage.getItem(gettingStartedKey) !== 'dismissed';
+    } catch {
+      return true;
+    }
+  });
+
+  const dismissGettingStarted = () => {
+    setShowGettingStarted(false);
+    try {
+      localStorage.setItem(gettingStartedKey, 'dismissed');
+    } catch {
+      // ignore
+    }
+  };
 
   React.useEffect(() => {
     if (authLoading) return;
@@ -63,11 +79,13 @@ export function Dashboard() {
         const PLATFORM_FEATURE_MAP: Record<string, string> = {
           facebook: 'facebook_publishing',
           instagram: 'instagram_publishing',
+          meta_ads: 'ad_campaigns',
         };
 
         const ALL_PLATFORMS = [
           { id: 'facebook', name: 'Facebook', status: 'disconnected' as string },
           { id: 'instagram', name: 'Instagram', status: 'disconnected' as string },
+          { id: 'meta_ads', name: 'Meta Ads', status: 'disconnected' as string },
           { id: 'whatsapp', name: 'WhatsApp', status: 'disconnected' as string },
         ];
 
@@ -136,18 +154,74 @@ export function Dashboard() {
   ];
 
   return (
-    <DashboardLayout tokens={tokens} totalTokens={totalTokens}>
+    <DashboardLayout>
       <header className="mb-8 flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
         <div>
           <h1 className="text-2xl font-bold tracking-tight text-slate-900 dark:text-slate-50 sm:text-3xl">Dashboard</h1>
           <p className="mt-1 text-sm text-slate-500">
             {user ? `Welcome back, ${user.name || user.email}!` : "Welcome back! Here's how this month is going."}
           </p>
+          {user?.packageName && (
+            <span className="mt-3 inline-flex items-center gap-2 rounded-full border border-indigo-200 bg-indigo-50 px-3 py-1 text-xs font-semibold text-indigo-700 dark:border-indigo-500/30 dark:bg-indigo-500/10 dark:text-indigo-300">
+              Current plan: {user.packageName}
+            </span>
+          )}
         </div>
-        <Button onClick={() => navigate('/packages')}>
-          <CoinsIcon className="h-4 w-4" aria-hidden="true" /> Buy tokens
-        </Button>
+        <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
+          {user && !user.packageName && (
+            <Button variant="secondary" onClick={() => navigate('/packages')}>
+              Choose a plan
+            </Button>
+          )}
+          <Button onClick={() => navigate('/packages')}>
+            <CoinsIcon className="h-4 w-4" aria-hidden="true" /> Buy tokens
+          </Button>
+        </div>
       </header>
+
+      {showGettingStarted && (
+        <section aria-labelledby="getting-started-heading" className="mb-8 rounded-2xl border border-indigo-200 bg-gradient-to-br from-indigo-50 to-white p-6 dark:border-indigo-500/30 dark:from-indigo-500/10 dark:to-slate-900">
+          <div className="flex items-start justify-between gap-4">
+            <div className="flex items-start gap-3">
+              <span className="grid h-10 w-10 shrink-0 place-items-center rounded-xl bg-indigo-600 text-white">
+                <SparklesIcon className="h-5 w-5" aria-hidden="true" />
+              </span>
+              <div>
+                <h2 id="getting-started-heading" className="text-base font-bold text-slate-900 dark:text-slate-50">
+                  {user ? `Welcome back, ${user.name || user.email}!` : 'Welcome to EchoPost!'}
+                </h2>
+                <p className="mt-1 max-w-2xl text-sm text-slate-600 dark:text-slate-300">
+                  Record a voice note on WhatsApp and EchoPost turns it into a publish-ready post. Approve it, schedule it,
+                  or let it go out across your connected channels. Tokens are spent when posts are generated — see the full
+                  guide for everything about credits and features.
+                </p>
+              </div>
+            </div>
+            <button
+              type="button"
+              onClick={dismissGettingStarted}
+              aria-label="Dismiss getting started"
+              className="rounded-lg p-1.5 text-slate-400 transition-colors hover:bg-slate-200/60 hover:text-slate-600 dark:hover:bg-slate-800"
+            >
+              <XIcon className="h-5 w-5" aria-hidden="true" />
+            </button>
+          </div>
+          <div className="mt-4 flex flex-wrap gap-3">
+            <Button size="sm" onClick={() => navigate('/dashboard/chat')}>
+              <MessageCircleIcon className="h-4 w-4" aria-hidden="true" /> Start in Chat
+            </Button>
+            <Button size="sm" variant="secondary" onClick={() => navigate('/connect')}>
+              <ExternalLinkIcon className="h-4 w-4" aria-hidden="true" /> Connect accounts
+            </Button>
+            <Button size="sm" variant="secondary" onClick={() => navigate('/packages')}>
+              <CoinsIcon className="h-4 w-4" aria-hidden="true" /> Buy credits
+            </Button>
+            <Button size="sm" variant="ghost" onClick={() => navigate('/dashboard/guide')}>
+              <BookOpenIcon className="h-4 w-4" aria-hidden="true" /> Read the full guide
+            </Button>
+          </div>
+        </section>
+      )}
 
       <div className="grid gap-6 sm:grid-cols-2 xl:grid-cols-4">
         <StatsCard label="Tokens remaining" value={`${tokens} / ${totalTokens}`} icon={CoinsIcon} tone="amber"

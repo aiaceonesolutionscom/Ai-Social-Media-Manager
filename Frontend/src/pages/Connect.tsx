@@ -20,11 +20,13 @@ const currentStep = 2;
 const PLATFORM_FEATURE_MAP: Record<string, string> = {
   facebook: 'facebook_publishing',
   instagram: 'instagram_publishing',
+  meta_ads: 'ad_campaigns',
 };
 
 const ALL_PLATFORMS: Platform[] = [
   { id: 'instagram', name: 'Instagram', description: 'Share photos and reels to your feed', status: 'disconnected' },
   { id: 'facebook', name: 'Facebook', description: 'Post to your Facebook Page', status: 'disconnected' },
+  { id: 'meta_ads', name: 'Meta Ads', description: 'Run ad campaigns on your Meta Ads account', status: 'disconnected' },
   { id: 'whatsapp', name: 'WhatsApp', description: 'Verify your WhatsApp number to start posting', status: 'disconnected' },
 ];
 
@@ -97,10 +99,10 @@ export function Connect() {
   const connect = async (platform: Platform) => {
     setBusy(platform.id);
 
-    // For Facebook and Instagram, redirect to OAuth
-    if (platform.id === 'facebook' || platform.id === 'instagram') {
+    // For Facebook, Instagram and Meta Ads, redirect to OAuth
+    if (platform.id === 'facebook' || platform.id === 'instagram' || platform.id === 'meta_ads') {
       const token = getUserToken();
-      window.location.href = `${window.location.origin}/api/social/connect/${platform.id}?token=${encodeURIComponent(token || '')}`;
+      window.location.href = `${window.location.origin}/api/social/connect/facebook?token=${encodeURIComponent(token || '')}`;
       return;
     }
 

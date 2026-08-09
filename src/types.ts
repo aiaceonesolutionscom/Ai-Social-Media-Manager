@@ -128,6 +128,7 @@ export type AgentAction =
   | 'cancel_publish'
   | 'new_post'
   | 'create_ad'
+  | 'schedule_post'
   | 'unclear'
 
 export interface AgentDecision {
@@ -136,6 +137,7 @@ export interface AgentDecision {
   question?: string
   intent?: Partial<Intent>
   editRequest?: string
+  scheduleAt?: string
 }
 
 export type EditScope = 'caption' | 'image' | 'both' | 'full'
@@ -175,6 +177,19 @@ export interface Package {
   features: Record<string, unknown>
   isActive: boolean
   sortOrder: number
+  billingPeriod: 'monthly' | 'yearly'
+  yearlyPriceCents: number
+  setupType: 'none' | 'standard' | 'premium'
+  createdAt: string
+  updatedAt: string
+}
+
+export interface TopUpBundle {
+  id: string
+  tokens: number
+  priceCents: number
+  isActive: boolean
+  sortOrder: number
   createdAt: string
   updatedAt: string
 }
@@ -212,7 +227,7 @@ export interface TokenTransaction {
   createdAt: string
 }
 
-export type SocialPlatform = 'instagram' | 'facebook' | 'whatsapp'
+export type SocialPlatform = 'instagram' | 'facebook' | 'whatsapp' | 'meta_ads'
 
 export interface SocialAccount {
   id: string
@@ -233,7 +248,7 @@ export interface AdminConfig {
   updatedAt: string
 }
 
-export type PaymentType = 'subscription' | 'one_time' | 'token_purchase'
+export type PaymentType = 'subscription' | 'one_time' | 'token_purchase' | 'topup'
 
 export interface Payment {
   id: string
@@ -271,7 +286,7 @@ export interface AdCampaign {
   postId?: string
   name: string
   objective: string
-  status: 'pending' | 'creating' | 'active' | 'paused' | 'failed'
+  status: 'pending' | 'creating' | 'scheduled' | 'active' | 'paused' | 'cancelled' | 'failed'
   adContent: AdContent
   targeting: AdTargeting
   budgetCents: number
@@ -279,6 +294,7 @@ export interface AdCampaign {
   adSetId?: string
   adId?: string
   imageUrl?: string
+  publishAt?: string
   createdAt: string
   updatedAt: string
 }

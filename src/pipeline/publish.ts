@@ -5,7 +5,7 @@ import { sendReplyButtons, sendText } from '../lib/whatsapp.js'
 import { fullCaption, platformCaption } from '../lib/caption.js'
 import { getPost, getUser, getPackage, resolveUserPhone, setConversation, setStage, getAccountByPlatform } from '../store.js'
 import { getTokenCost, deductTokens } from '../lib/tokens.js'
-import { eq, sql } from 'drizzle-orm'
+import { and, eq, sql } from 'drizzle-orm'
 import { getDb } from '../db.js'
 import { scheduledPosts } from '../db/schema.js'
 
@@ -276,12 +276,6 @@ export function resetPublishJobs(): void {
   jobs.clear()
 }
 
-interface ScheduledPost {
-  postId: string
-  phone: string
-  publishAt: string
-}
-
 let schedulerInterval: NodeJS.Timeout | null = null
 
 export async function schedulePost(postId: string, phone: string, publishAt: string): Promise<void> {
@@ -302,11 +296,98 @@ export async function cancelScheduledPost(postId: string): Promise<boolean> {
   return true
 }
 
-export async function getScheduledPosts(_phone?: string): Promise<ScheduledPost[]> {
+export interface ScheduledPostInfo {
+  id: string
+  postId: string
+  publishAt: string
+  status: string
+  caption?: string
+  imageUrl?: string
+}
+
+export async function getScheduledPosts(phone?: string): Promise<ScheduledPostInfo[]> {
   const db = getDb()
-  const query = db.select().from(scheduledPosts).where(eq(scheduledPosts.status, 'pending')).orderBy(scheduledPosts.publishAt)
-  const results = await query
-  return results.map((r) => ({ postId: r.postId, phone: r.phone, publishAt: r.publishAt }))
+  const base = db.select().from(scheduledPosts)
+  const rows = phone
+    ? await base.where(and(eq(scheduledPosts.phone, await resolveUserPhone(phone)), sql`${scheduledPosts.status} IN ('pending', 'processing')`)).orderBy(scheduledPosts.publishAt)
+    : await base.where(sql`${scheduledPosts.status} IN ('pending', 'processing')`).orderBy(scheduledPosts.publishAt)
+  const out: ScheduledPostInfo[] = []
+  for (const row of rows) {
+    const post = await getPost(row.postId)
+    out.push({
+      id: row.id,
+      postId: row.postId,
+      publishAt: row.publishAt,
+      status: row.status,
+      caption: post?.content?.caption || post?.transcript,
+      imageUrl: post?.imageUrl,
+    })
+  }
+  return out
+}
+
+export async function cancelScheduledPostById(id: string, phone: string): Promise<boolean> {
+  const rows = await getDb().update(scheduledPosts)
+    .set({ status: 'cancelled' })
+    .where(and(eq(scheduledPosts.id, id), eq(scheduledPosts.phone, await resolveUserPhone(phone)), eq(scheduledPosts.status, 'pending')))
+    .returning()
+  return rows.length > 0
+}
+
+export function parseScheduleTime(value: string): string | null {
+  if (!value) return null
+  const text = value.trim()
+  const now = new Date()
+
+  if (!Number.isNaN(Date.parse(text))) {
+    const d = new Date(text)
+    return d > now ? d.toISOString() : null
+  }
+
+  const inMatch = /in\s+(\d+)\s*(minute|min|mins|minutes|hour|hr|hrs|hours|day|days|week|weeks)\b/i.exec(text)
+  if (inMatch) {
+    const n = parseInt(inMatch[1], 10)
+    const unit = inMatch[2].toLowerCase()
+    const d = new Date(now)
+    if (unit.startsWith('min')) d.setMinutes(d.getMinutes() + n)
+    else if (unit.startsWith('h')) d.setHours(d.getHours() + n)
+    else if (unit.startsWith('d')) d.setDate(d.getDate() + n)
+    else if (unit.startsWith('w')) d.setDate(d.getDate() + n * 7)
+    return d > now ? d.toISOString() : null
+  }
+
+  const dayMatch = /\b(today|tonight|tomorrow)\b/i.exec(text)
+  const timeMatch = /(\d{1,2})(?::(\d{2}))?\s*(am|pm|a\.m\.|p\.m\.)?\b/i.exec(text)
+  if (dayMatch) {
+    const d = new Date(now)
+    const dayWord = dayMatch[1].toLowerCase()
+    if (dayWord === 'tomorrow') d.setDate(d.getDate() + 1)
+    if (timeMatch) {
+      let h = parseInt(timeMatch[1], 10)
+      const m = timeMatch[2] ? parseInt(timeMatch[2], 10) : 0
+      const meridiem = (timeMatch[3] || '').toLowerCase()
+      if (meridiem.startsWith('p') && h < 12) h += 12
+      if (meridiem.startsWith('a') && h === 12) h = 0
+      d.setHours(h, m, 0, 0)
+    } else {
+      d.setHours(20, 0, 0, 0)
+    }
+    return d > now ? d.toISOString() : null
+  }
+
+  if (timeMatch) {
+    const d = new Date(now)
+    let h = parseInt(timeMatch[1], 10)
+    const m = timeMatch[2] ? parseInt(timeMatch[2], 10) : 0
+    const meridiem = (timeMatch[3] || '').toLowerCase()
+    if (meridiem.startsWith('p') && h < 12) h += 12
+    if (meridiem.startsWith('a') && h === 12) h = 0
+    d.setHours(h, m, 0, 0)
+    if (d <= now) d.setDate(d.getDate() + 1)
+    return d.toISOString()
+  }
+
+  return null
 }
 
 function startScheduler(): void {

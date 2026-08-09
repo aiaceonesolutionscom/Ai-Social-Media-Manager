@@ -9,8 +9,11 @@ import { Modal } from '../../components/ui/Modal';
 import { Button } from '../../components/ui/Button';
 import { notify } from '../../components/ui/Toast';
 import { apiRequest, endpoints, ApiError, setAuthToken } from '../../utils/api';
+import { Pagination } from '../../components/ui/Pagination';
 import type { Payment } from '../../types';
 import { formatCurrency, formatDate } from '../../utils/format';
+
+const PAGE_SIZE = 10;
 
 function fromApiPayment(p: any): Payment {
   return {
@@ -28,6 +31,9 @@ export function AdminPayments() {
   const [items, setItems] = React.useState<Payment[]>([]);
   const [loading, setLoading] = React.useState(true);
   const [receipt, setReceipt] = React.useState<Payment | null>(null);
+  const [page, setPage] = React.useState(1);
+
+  const paginated = React.useMemo(() => items.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE), [items, page]);
 
   const fetchPayments = async () => {
     try {
@@ -67,7 +73,10 @@ export function AdminPayments() {
             {[1,2,3].map(i => <div key={i} className="h-16 rounded-xl bg-slate-100 animate-pulse" />)}
           </div>
         ) : (
-          <PaymentTable payments={items} onViewReceipt={setReceipt} onRefund={() => notify.info('Refund', 'Refund processing coming soon')} />
+          <>
+            <PaymentTable payments={paginated} onViewReceipt={setReceipt} onRefund={() => notify.info('Refund', 'Refund processing coming soon')} />
+            <Pagination page={page} total={items.length} pageSize={PAGE_SIZE} onPageChange={setPage} />
+          </>
         )}
       </div>
 

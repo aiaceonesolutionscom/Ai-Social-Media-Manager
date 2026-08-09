@@ -1,9 +1,10 @@
 import { FastifyInstance } from 'fastify'
 import { listUsers, listPayments, listPosts } from '../../store.js'
+import { guard } from './middleware.js'
 
 export async function registerAdminStatsRoutes(server: FastifyInstance): Promise<void> {
 
-  server.get('/api/admin/stats', async (req: any, reply: any) => {
+  server.get('/api/admin/stats', guard('dashboard.view'), async (req: any, reply: any) => {
     const users = await listUsers()
     const payments = await listPayments()
     const posts = await listPosts()
@@ -36,7 +37,7 @@ export async function registerAdminStatsRoutes(server: FastifyInstance): Promise
     })
   })
 
-  server.get('/api/admin/stats/chart', async (req: any, reply: any) => {
+  server.get('/api/admin/stats/chart', guard('dashboard.view'), async (req: any, reply: any) => {
     const payments = await listPayments()
     const completedPayments = payments.filter(p => p.status === 'completed')
 

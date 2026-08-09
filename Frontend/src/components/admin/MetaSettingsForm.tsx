@@ -47,6 +47,10 @@ const KEY_LABELS: Record<string, string> = {
   webhook_secret: 'Webhook Secret',
   access_token: 'WhatsApp Permanent Access Token',
   phone_number_id: 'WhatsApp Phone Number ID',
+  otp_template: 'OTP Template Name',
+  otp_template_language: 'OTP Template Language',
+  welcome_template: 'Welcome Template Name',
+  welcome_template_language: 'Welcome Template Language',
   facebook: 'Facebook API Version',
   instagram: 'Instagram API Version',
   meta_ads: 'Meta Ads API Version',
@@ -91,6 +95,10 @@ const DEFAULT_FIELDS: Record<string, Array<{ key: string; label: string; sensiti
   whatsapp: [
     { key: 'access_token', label: 'WhatsApp Permanent Access Token', sensitive: true, placeholder: 'Enter WhatsApp permanent token' },
     { key: 'phone_number_id', label: 'WhatsApp Phone Number ID', sensitive: false, placeholder: 'Enter phone number ID' },
+    { key: 'otp_template', label: 'OTP Template Name', sensitive: false, placeholder: 'otp_verification' },
+    { key: 'otp_template_language', label: 'OTP Template Language', sensitive: false, placeholder: 'en' },
+    { key: 'welcome_template', label: 'Welcome Template Name', sensitive: false, placeholder: 'welcome_message' },
+    { key: 'welcome_template_language', label: 'Welcome Template Language', sensitive: false, placeholder: 'en' },
   ],
   api_versions: [
     { key: 'facebook', label: 'Facebook API Version', sensitive: false, placeholder: 'v21.0' },

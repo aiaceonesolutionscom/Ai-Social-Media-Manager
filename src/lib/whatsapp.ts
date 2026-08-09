@@ -62,9 +62,70 @@ export async function sendText(to: string, text: string): Promise<Record<string,
   })
 }
 
+// Send an approved template message. Template name + language come from meta config with env fallback.
+export async function sendTemplate(
+  to: string,
+  templateName: string,
+  language: string,
+  params: string[],
+  logLabel = 'template',
+): Promise<Record<string, unknown>> {
+  const conv = await getConversation(to)
+  await logMessage({ phone: to, role: 'bot', type: 'text', content: `[${logLabel}] sent to ${to}`, postId: conv.postId })
+  if (isWebOnlyPhone(to)) return mockResult(logLabel)
+  if (isWhatsAppMocked()) return mockResult(logLabel)
+  return api(`/${getWhatsAppPhoneId()}/messages`, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${getWhatsAppToken()}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      messaging_product: 'whatsapp',
+      to,
+      type: 'template',
+      template: {
+        name: templateName,
+        language: { code: language },
+        components: [{ type: 'body', parameters: params.map((text) => ({ type: 'text', text })) }],
+      },
+    }),
+  })
+}
+
+// Send an OTP verification code via an approved template message.
+// WhatsApp Cloud API requires a template for business-initiated messages (no 24h session yet).
+// Template name is configurable via META_WA_OTP_TEMPLATE (default: 'otp_verification').
+// The template must have exactly one {{1}} parameter that receives the code.
+export async function sendOtpTemplate(to: string, code: string): Promise<Record<string, unknown>> {
+  const templateName = metaConfig.getValue('whatsapp', 'otp_template') || process.env.META_WA_OTP_TEMPLATE || 'otp_verification'
+  const language = metaConfig.getValue('whatsapp', 'otp_template_language') || 'en'
+  const conv = await getConversation(to)
+  await logMessage({ phone: to, role: 'bot', type: 'text', content: `[otp template] code sent to ${to}`, postId: conv.postId })
+  if (isWebOnlyPhone(to)) return mockResult('sendOtpTemplate')
+  if (isWhatsAppMocked()) return mockResult('sendOtpTemplate')
+  return api(`/${getWhatsAppPhoneId()}/messages`, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${getWhatsAppToken()}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      messaging_product: 'whatsapp',
+      to,
+      type: 'template',
+      template: {
+        name: templateName,
+        language: { code: language },
+        components: [{ type: 'body', parameters: [{ type: 'text', text: code }] }],
+      },
+    }),
+  })
+}
+
 export async function sendImage(to: string, mediaUrl: string, caption: string): Promise<Record<string, unknown>> {
   const conv = await getConversation(to)
-  await logMessage({ phone: to, role: 'bot', type: 'image', content: `[image] ${caption.slice(0, 200)}`, postId: conv.postId })
+  await logMessage({ phone: to, role: 'bot', type: 'image', content: `[image ${mediaUrl}] ${caption.slice(0, 200)}`, postId: conv.postId })
   if (isWebOnlyPhone(to)) return mockResult('sendImage')
   if (isWhatsAppMocked()) return mockResult('sendImage')
   return api(`/${getWhatsAppPhoneId()}/messages`, {

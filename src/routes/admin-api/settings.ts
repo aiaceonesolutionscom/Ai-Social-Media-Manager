@@ -1,6 +1,7 @@
 import { FastifyInstance } from 'fastify'
 import { getAllConfig, setConfig } from '../../store.js'
 import { fetchWithRetry } from '../../lib/http.js'
+import { guard } from './middleware.js'
 
 const ALLOWED_SETTING_KEYS = new Set<string>([
   'instagram_token',
@@ -25,7 +26,7 @@ const ALLOWED_SETTING_KEYS = new Set<string>([
 
 export async function registerAdminSettingsRoutes(server: FastifyInstance): Promise<void> {
 
-  server.get('/api/admin/settings', async (req: any, reply: any) => {
+  server.get('/api/admin/settings', guard('settings.view'), async (req: any, reply: any) => {
     const config = await getAllConfig()
     const safeConfig: Record<string, string> = {}
     for (const [key, value] of Object.entries(config)) {
@@ -38,7 +39,7 @@ export async function registerAdminSettingsRoutes(server: FastifyInstance): Prom
     return reply.send({ settings: safeConfig })
   })
 
-  server.put('/api/admin/settings', async (req: any, reply: any) => {
+  server.put('/api/admin/settings', guard('settings.update'), async (req: any, reply: any) => {
     const settings = req.body as Record<string, string | number>
 
     if (!settings || typeof settings !== 'object') {
@@ -57,7 +58,7 @@ export async function registerAdminSettingsRoutes(server: FastifyInstance): Prom
     return reply.send({ success: true, updated })
   })
 
-  server.get('/api/admin/settings/api-keys', async (req: any, reply: any) => {
+  server.get('/api/admin/settings/api-keys', guard('settings.view'), async (req: any, reply: any) => {
     const config = await getAllConfig()
     return reply.send({
       whatsapp: {
@@ -83,7 +84,7 @@ export async function registerAdminSettingsRoutes(server: FastifyInstance): Prom
 
   // ---- Test Connection Endpoints ----
 
-  server.post('/api/admin/settings/test/:integration', async (req: any, reply: any) => {
+  server.post('/api/admin/settings/test/:integration', guard('settings.update'), async (req: any, reply: any) => {
     const { integration } = req.params as { integration: string }
     const config = await getAllConfig()
     const start = Date.now()

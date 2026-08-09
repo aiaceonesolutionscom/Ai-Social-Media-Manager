@@ -1,4 +1,5 @@
 import { chat, chatJson } from '../lib/llm.js'
+import { buildBrandContext } from '../lib/branding.js'
 import type {
   BrandCheck,
   BrandProfile,
@@ -111,12 +112,12 @@ export async function planContent(intent: Intent): Promise<PlannedContent> {
   return chatJson<PlannedContent>(messages)
 }
 
-export async function writeContent(intent: Intent, plan: PlannedContent, prefs?: UserPreferences): Promise<WrittenContent> {
+export async function writeContent(intent: Intent, plan: PlannedContent, prefs?: UserPreferences, brand?: BrandProfile): Promise<WrittenContent> {
   const prefsContext = prefs
     ? `\nUser preferences (respect these):\n- language: ${prefs.language}\n- tone: ${prefs.tone}\n- audience: ${prefs.audience}`
     : ''
   const messages = [
-    { role: 'system' as const, content: SYSTEM_WRITER + prefsContext },
+    { role: 'system' as const, content: SYSTEM_WRITER + prefsContext + buildBrandContext(brand) },
     { role: 'user' as const, content: JSON.stringify({ intent, plan }) },
   ]
   return chatJson<WrittenContent>(messages, { temperature: 0.8 })
@@ -156,6 +157,7 @@ export async function planEdit(current: { topic: string; caption: string }, edit
 export interface FullDraftOptions {
   intent?: Intent
   preferences?: UserPreferences
+  brandProfile?: BrandProfile
 }
 
 async function writeContentForPlatform(
@@ -163,13 +165,14 @@ async function writeContentForPlatform(
   plan: PlannedContent,
   platform: 'facebook' | 'instagram',
   prefs?: UserPreferences,
+  brand?: BrandProfile,
 ): Promise<WrittenContent> {
   const systemPrompt = platform === 'facebook' ? SYSTEM_WRITER_FACEBOOK : SYSTEM_WRITER_INSTAGRAM
   const prefsContext = prefs
     ? `\nUser preferences (respect these):\n- language: ${prefs.language}\n- tone: ${prefs.tone}\n- audience: ${prefs.audience}`
     : ''
   const messages = [
-    { role: 'system' as const, content: systemPrompt + prefsContext },
+    { role: 'system' as const, content: systemPrompt + prefsContext + buildBrandContext(brand) },
     { role: 'user' as const, content: JSON.stringify({ intent, plan }) },
   ]
   return chatJson<WrittenContent>(messages, { temperature: 0.8 })
@@ -179,10 +182,11 @@ export async function generatePlatformContent(
   intent: Intent,
   plan: PlannedContent,
   prefs?: UserPreferences,
+  brand?: BrandProfile,
 ): Promise<PlatformContent> {
   const [facebook, instagram] = await Promise.all([
-    writeContentForPlatform(intent, plan, 'facebook', prefs),
-    writeContentForPlatform(intent, plan, 'instagram', prefs),
+    writeContentForPlatform(intent, plan, 'facebook', prefs, brand),
+    writeContentForPlatform(intent, plan, 'instagram', prefs, brand),
   ])
   return { facebook, instagram }
 }
@@ -190,8 +194,8 @@ export async function generatePlatformContent(
 export async function generateFullDraft(post: Post, transcript: string, opts: FullDraftOptions = {}): Promise<Post> {
   const intent = opts.intent ?? (await extractIntent(transcript, opts.preferences))
   const plan = await planContent(intent)
-  const content = await writeContent(intent, plan, opts.preferences)
-  const platformContent = await generatePlatformContent(intent, plan, opts.preferences)
+  const content = await writeContent(intent, plan, opts.preferences, opts.brandProfile)
+  const platformContent = await generatePlatformContent(intent, plan, opts.preferences, opts.brandProfile)
   const imagePrompt = await generateImagePrompt(intent.topic, content.caption)
   return {
     ...post,

@@ -1,5 +1,5 @@
 import React from 'react';
-import { FacebookIcon, InstagramIcon, MessageCircleIcon } from 'lucide-react';
+import { FacebookIcon, InstagramIcon, MessageCircleIcon, MegaphoneIcon } from 'lucide-react';
 import type { ConnectionStatus, Platform, PlatformId } from '../../types';
 import { Badge, type BadgeTone } from '../ui/Badge';
 import { cn } from '../../utils/cn';
@@ -7,7 +7,8 @@ import { cn } from '../../utils/cn';
 const icons: Record<PlatformId, React.ComponentType<{className?: string;}>> = {
   instagram: InstagramIcon,
   facebook: FacebookIcon,
-  whatsapp: MessageCircleIcon
+  whatsapp: MessageCircleIcon,
+  meta_ads: MegaphoneIcon
 };
 
 const statusTone: Record<ConnectionStatus, BadgeTone> = {

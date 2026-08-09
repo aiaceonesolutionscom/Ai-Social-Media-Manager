@@ -184,11 +184,12 @@ export async function boostPost(
     caption: string
     budgetCents: number
     targeting: Record<string, unknown>
+    objective?: string
   }
 ): Promise<AdResult> {
   const campaignId = await createCampaign(adAccountId, accessToken, {
     name: `${config.name} - Campaign`,
-    objective: 'OUTCOME_ENGAGEMENT',
+    objective: config.objective || 'OUTCOME_ENGAGEMENT',
     budgetCents: config.budgetCents,
     startDate: new Date().toISOString().split('T')[0],
   })

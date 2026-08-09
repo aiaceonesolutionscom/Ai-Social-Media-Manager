@@ -3,41 +3,17 @@ import { useNavigate } from 'react-router-dom';
 import { PencilIcon, PlusIcon, Trash2Icon } from 'lucide-react';
 import { AdminLayout } from '../../components/layout/AdminLayout';
 import { AdminHeader } from '../../components/admin/AdminHeader';
-import { PackageForm, type PackageFormValues, FEATURE_OPTIONS } from '../../components/admin/PackageForm';
+import { PackageForm, type PackageFormValues } from '../../components/admin/PackageForm';
 import { DataTable, type Column } from '../../components/ui/DataTable';
 import { Badge } from '../../components/ui/Badge';
 import { Button } from '../../components/ui/Button';
 import { Modal } from '../../components/ui/Modal';
 import { notify } from '../../components/ui/Toast';
 import { apiRequest, endpoints, ApiError, setAuthToken } from '../../utils/api';
+import { FEATURE_OPTIONS, FEATURE_KEY_MAP } from '../../utils/features';
 import type { PricingPackage } from '../../types';
 import { formatCurrency } from '../../utils/format';
-
-const FEATURE_KEY_MAP: Record<string, string> = {
-  'Facebook publishing': 'facebook_publishing',
-  'Instagram publishing': 'instagram_publishing',
-  'WhatsApp broadcasts': 'whatsapp_broadcast',
-  'Website support chat': 'web_chat',
-  'Voice to post transcription': 'voice_transcription',
-  'Scheduled auto-publishing': 'scheduled_publishing',
-  'Full analytics dashboard': 'analytics_dashboard',
-  'Priority support': 'priority_support',
-};
-
-function toPackage(values: PackageFormValues, base?: PricingPackage | null): PricingPackage {
-  return {
-    id: base?.id ?? values.name.toLowerCase().replace(/\s+/g, '-'),
-    name: values.name,
-    description: values.description,
-    price: values.price,
-    tokens: values.tokens,
-    sortOrder: values.sortOrder,
-    popular: base?.popular,
-    status: base?.status ?? 'active',
-    users: base?.users ?? 0,
-    features: FEATURE_OPTIONS.map((label) => ({ label, included: values.features.includes(label) }))
-  };
-}
+import { cn } from '../../utils/cn';
 
 function fromApiPackage(p: any): PricingPackage {
   const features = p.features || {};
@@ -50,6 +26,9 @@ function fromApiPackage(p: any): PricingPackage {
     sortOrder: p.sortOrder,
     status: p.isActive ? 'active' : 'inactive',
     users: 0,
+    billingPeriod: p.billingPeriod === 'yearly' ? 'yearly' : 'monthly',
+    yearlyPrice: p.yearlyPriceCents ? p.yearlyPriceCents / 100 : undefined,
+    setupType: p.setupType === 'standard' || p.setupType === 'premium' ? p.setupType : 'none',
     features: FEATURE_OPTIONS.map((label) => ({
       label,
       included: features[FEATURE_KEY_MAP[label]] === true,
@@ -57,10 +36,20 @@ function fromApiPackage(p: any): PricingPackage {
   };
 }
 
+type PackageFilter = 'all' | 'monthly' | 'yearly' | 'setup';
+
+const FILTERS: Array<{ value: PackageFilter; label: string }> = [
+  { value: 'all', label: 'All' },
+  { value: 'monthly', label: 'Monthly' },
+  { value: 'yearly', label: 'Yearly' },
+  { value: 'setup', label: 'Setup' },
+];
+
 export function AdminPackages() {
   const navigate = useNavigate();
   const [items, setItems] = React.useState<PricingPackage[]>([]);
   const [defaultSlug, setDefaultSlug] = React.useState('pro');
+  const [filter, setFilter] = React.useState<PackageFilter>('all');
   const [loading, setLoading] = React.useState(true);
   const [editing, setEditing] = React.useState<PricingPackage | null>(null);
   const [formOpen, setFormOpen] = React.useState(false);
@@ -102,33 +91,29 @@ export function AdminPackages() {
       FEATURE_OPTIONS.forEach((label) => {
         features[FEATURE_KEY_MAP[label]] = values.features.includes(label);
       });
+      const payload = {
+        name: values.name,
+        slug: values.name.toLowerCase().replace(/\s+/g, '-'),
+        description: values.description,
+        priceCents: Math.round(values.price * 100),
+        includedTokens: values.tokens,
+        sortOrder: values.sortOrder,
+        billingPeriod: values.billingPeriod,
+        yearlyPriceCents: values.billingPeriod === 'yearly' ? Math.round(values.yearlyPrice * 100) : 0,
+        setupType: values.setupType,
+        features,
+      };
 
       if (editing) {
         await apiRequest(endpoints.adminPackage(editing.id), {
           method: 'PUT',
-          body: JSON.stringify({
-            name: values.name,
-            slug: values.name.toLowerCase().replace(/\s+/g, '-'),
-            description: values.description,
-            priceCents: Math.round(values.price * 100),
-            includedTokens: values.tokens,
-            sortOrder: values.sortOrder,
-            features,
-          }),
+          body: JSON.stringify(payload),
         });
         notify.success('Package updated', `${values.name} updated`);
       } else {
         await apiRequest(endpoints.adminPackages, {
           method: 'POST',
-          body: JSON.stringify({
-            name: values.name,
-            slug: values.name.toLowerCase().replace(/\s+/g, '-'),
-            description: values.description,
-            priceCents: Math.round(values.price * 100),
-            includedTokens: values.tokens,
-            sortOrder: values.sortOrder,
-            features,
-          }),
+          body: JSON.stringify(payload),
         });
         notify.success('Package created', `${values.name} created`);
       }
@@ -165,6 +150,13 @@ export function AdminPackages() {
     }
   };
 
+  const filtered = items.filter((p) => {
+    if (filter === 'setup') return p.setupType === 'standard' || p.setupType === 'premium';
+    if (filter === 'yearly') return p.billingPeriod === 'yearly';
+    if (filter === 'monthly') return p.billingPeriod !== 'yearly' && (!p.setupType || p.setupType === 'none');
+    return true;
+  });
+
   const columns: Array<Column<PricingPackage>> = [
     {
       key: 'name', header: 'Name',
@@ -179,6 +171,15 @@ export function AdminPackages() {
           )}
         </span>
       )
+    },
+    {
+      key: 'type', header: 'Type',
+      render: (p) => {
+        if (p.setupType === 'standard' || p.setupType === 'premium') {
+          return <Badge tone="amber">{p.setupType === 'premium' ? 'Premium setup' : 'Standard setup'}</Badge>;
+        }
+        return p.billingPeriod === 'yearly' ? <Badge tone="emerald">Yearly</Badge> : <Badge tone="slate">Monthly</Badge>;
+      }
     },
     { key: 'price', header: 'Price', render: (p) => <span className="font-mono">{formatCurrency(p.price)}</span> },
     { key: 'tokens', header: 'Tokens', render: (p) => <span className="font-mono">{p.tokens.toLocaleString()}</span> },
@@ -213,7 +214,7 @@ export function AdminPackages() {
     <AdminLayout>
       <AdminHeader
         title="Package Management"
-        description="Create and price the token bundles customers can buy."
+        description="Create monthly, yearly and setup packages customers can buy."
         action={
           <Button onClick={openCreate}>
             <PlusIcon className="h-4 w-4" aria-hidden="true" /> Create package
@@ -221,12 +222,29 @@ export function AdminPackages() {
         }
       />
 
+      <div className="mt-6 flex flex-wrap gap-2">
+        {FILTERS.map((f) => (
+          <button
+            key={f.value}
+            type="button"
+            onClick={() => setFilter(f.value)}
+            className={cn(
+              'rounded-full border px-4 py-1.5 text-sm font-semibold transition-colors',
+              filter === f.value
+                ? 'border-indigo-500 bg-indigo-600 text-white'
+                : 'border-slate-200 bg-white text-slate-600 hover:bg-slate-50 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-300 dark:hover:bg-slate-800'
+            )}>
+            {f.label}
+          </button>
+        ))}
+      </div>
+
       {loading ? (
-        <div className="space-y-4">
+        <div className="mt-6 space-y-4">
           {[1,2,3].map(i => <div key={i} className="h-16 rounded-xl bg-slate-100 animate-pulse" />)}
         </div>
       ) : (
-        <DataTable columns={columns} rows={items} rowKey={(p) => p.id} caption="All packages" emptyMessage="No packages yet." />
+        <DataTable columns={columns} rows={filtered} rowKey={(p) => p.id} caption={`${filtered.length} packages`} emptyMessage="No packages in this category yet." />
       )}
 
       <Modal open={formOpen} onClose={() => setFormOpen(false)} title={editing ? `Edit ${editing.name}` : 'Create package'}

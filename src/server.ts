@@ -1,23 +1,33 @@
 import { config } from './config.js'
-import { initStore, recoverStuckPosts, listPackages, getAllConfig, getUser, getPackage } from './store.js'
+import { initStore, recoverStuckPosts, listPackages, getAllConfig, getUser, getPackage, createPost, setStage, listScheduledAdCampaigns, cancelScheduledAdCampaign } from './store.js'
 import { providerManager } from './lib/ai/providerManager.js'
 import { metaConfig } from './lib/metaConfig.js'
 import { closeDb } from './db.js'
 import { registerMediaRoute } from './routes/media.js'
 import { handleWebhook, handleVerify } from './routes/webhook.js'
 import { handleUserInput, handleVoiceInput } from './pipeline/conversation.js'
-import { startPublishScheduler } from './pipeline/publish.js'
+import { startPublishScheduler, schedulePost, getScheduledPosts, cancelScheduledPostById, parseScheduleTime } from './pipeline/publish.js'
+import { startAdScheduler } from './pipeline/adScheduler.js'
+import { requireFeature, FeatureNotIncludedError } from './lib/packagePermissions.js'
+import { bootstrapSuperAdmin } from './lib/adminAuth.js'
+import { saveImageBuffer } from './storage.js'
+import { localFileUrl } from './lib/whatsapp.js'
 import { ensureReady } from './config.js'
 import { verifyWebhookSignature } from './lib/whatsapp.js'
 import { rateLimit } from './lib/ratelimit.js'
 import { registerAdminAuthRoutes } from './routes/admin-api/auth.js'
 import { registerAdminPackageRoutes } from './routes/admin-api/packages.js'
+import { registerAdminTopUpRoutes } from './routes/admin-api/topups.js'
 import { registerAdminUserRoutes } from './routes/admin-api/users.js'
 import { registerAdminPaymentRoutes } from './routes/admin-api/payments.js'
 import { registerAdminSettingsRoutes } from './routes/admin-api/settings.js'
 import { registerAdminStatsRoutes } from './routes/admin-api/stats.js'
 import { registerAdminAIProviderRoutes } from './routes/admin-api/ai-providers.js'
 import { registerAdminMetaSettingsRoutes } from './routes/admin-api/meta-settings.js'
+import { registerAdminReportRoutes } from './routes/admin-api/reports.js'
+import { registerAdminAdminsRoutes } from './routes/admin-api/admins.js'
+import { registerAdminAuditRoutes } from './routes/admin-api/audit.js'
+import { registerAssistantRoutes } from './routes/assistant.js'
 import { registerSupportRoutes } from './routes/support.js'
 import { registerHealthRoutes } from './routes/health.js'
 import { registerBillingRoutes } from './routes/billing.js'
@@ -26,15 +36,19 @@ import { registerAuthRoutes } from './routes/auth.js'
 import { registerSocialRoutes } from './routes/social.js'
 import { registerCheckoutRoutes } from './routes/checkout.js'
 import { registerChatRoutes } from './routes/chat.js'
+import { registerBrandRoutes } from './routes/brand.js'
+import { registerTopUpRoutes } from './routes/topup.js'
 import { verifySession } from './lib/userAuth.js'
 import { adminAuthMiddleware } from './routes/admin-api/middleware.js'
 
 async function main(): Promise<void> {
   await initStore()
+  await bootstrapSuperAdmin()
   await providerManager.load()
   await metaConfig.load()
   await recoverStuckPosts()
   startPublishScheduler()
+  startAdScheduler()
   // ensureReady() — commented out for dev mode without real API keys
 
   if (config.admin.email === 'admin@example.com' || config.admin.password === 'admin123') {
@@ -167,7 +181,17 @@ async function main(): Promise<void> {
     }
 
     const pkg = await getPackage(user.packageId)
-    return reply.send({ features: pkg?.features || {} })
+    return reply.send({
+      features: pkg?.features || {},
+      package: pkg
+        ? {
+            slug: pkg.slug,
+            name: pkg.name,
+            tokens: pkg.includedTokens,
+            priceCents: pkg.priceCents,
+          }
+        : null,
+    })
   })
 
   // User API: get current user's posts
@@ -183,16 +207,155 @@ async function main(): Promise<void> {
     return reply.send({ posts })
   })
 
+  // User API: get current user's scheduled posts
+  server.get('/api/posts/scheduled', async (req: any, reply: any) => {
+    const token = req.headers['authorization']?.replace('Bearer ', '') || ''
+    if (!token) return reply.status(401).send({ error: 'No token provided' })
+
+    const session = await verifySession(token)
+    if (!session) return reply.status(401).send({ error: 'Invalid or expired session' })
+
+    try {
+      await requireFeature(session.phone, 'scheduled_publishing')
+    } catch (err) {
+      if (err instanceof FeatureNotIncludedError) return reply.status(403).send({ error: err.message })
+      throw err
+    }
+
+    const posts = await getScheduledPosts(session.phone)
+    return reply.send({ posts })
+  })
+
+  // User API: schedule a new post from the dashboard (caption + image + time)
+  server.post('/api/posts/schedule', async (req: any, reply: any) => {
+    const token = req.headers['authorization']?.replace('Bearer ', '') || ''
+    if (!token) return reply.status(401).send({ error: 'No token provided' })
+
+    const session = await verifySession(token)
+    if (!session) return reply.status(401).send({ error: 'Invalid or expired session' })
+
+    try {
+      await requireFeature(session.phone, 'scheduled_publishing')
+    } catch (err) {
+      if (err instanceof FeatureNotIncludedError) return reply.status(403).send({ error: err.message })
+      throw err
+    }
+
+    const { caption, publishAt, imageBase64 } = req.body as {
+      caption?: string
+      publishAt?: string
+      imageBase64?: string
+    }
+
+    if (!caption || typeof caption !== 'string' || !caption.trim()) {
+      return reply.status(400).send({ error: 'caption is required' })
+    }
+    const publishIso = parseScheduleTime(publishAt || '')
+    if (!publishIso) {
+      return reply.status(400).send({ error: 'publishAt must be a valid future time (e.g. ISO date, "in 2 hours", "tomorrow at 5pm")' })
+    }
+    const imageBuffer = imageBase64 ? Buffer.from(imageBase64.replace(/^data:image\/\w+;base64,/, ''), 'base64') : undefined
+    if (!imageBuffer || imageBuffer.length === 0) {
+      return reply.status(400).send({ error: 'image is required' })
+    }
+
+    const post = await createPost(session.phone)
+    const content = {
+      hook: '',
+      caption: caption.trim(),
+      cta: '',
+      emojis: '',
+      hashtags: '',
+      seoKeywords: [],
+    }
+    await setStage(post.id, 'WRITTEN', {
+      content,
+      intent: { topic: caption.trim(), audience: '', tone: '', goal: 'promote', language: '', emotion: '' },
+    })
+    const relPath = saveImageBuffer(imageBuffer, post.id)
+    await setStage(post.id, 'IMAGE', { imagePath: relPath, imageUrl: localFileUrl(relPath) })
+    await schedulePost(post.id, session.phone, publishIso)
+    return reply.status(201).send({ postId: post.id, publishAt: publishIso })
+  })
+
+  // User API: cancel a scheduled post
+  server.post('/api/posts/scheduled/:id/cancel', async (req: any, reply: any) => {
+    const token = req.headers['authorization']?.replace('Bearer ', '') || ''
+    if (!token) return reply.status(401).send({ error: 'No token provided' })
+
+    const session = await verifySession(token)
+    if (!session) return reply.status(401).send({ error: 'Invalid or expired session' })
+
+    try {
+      await requireFeature(session.phone, 'scheduled_publishing')
+    } catch (err) {
+      if (err instanceof FeatureNotIncludedError) return reply.status(403).send({ error: err.message })
+      throw err
+    }
+
+    const { id } = req.params as { id: string }
+    const cancelled = await cancelScheduledPostById(id, session.phone)
+    if (!cancelled) return reply.status(404).send({ error: 'Scheduled post not found' })
+    return reply.send({ success: true })
+  })
+
+  // User API: get current user's scheduled ad campaigns
+  server.get('/api/ads/scheduled', async (req: any, reply: any) => {
+    const token = req.headers['authorization']?.replace('Bearer ', '') || ''
+    if (!token) return reply.status(401).send({ error: 'No token provided' })
+
+    const session = await verifySession(token)
+    if (!session) return reply.status(401).send({ error: 'Invalid or expired session' })
+
+    try {
+      await requireFeature(session.phone, 'scheduled_publishing')
+      await requireFeature(session.phone, 'ad_campaigns')
+    } catch (err) {
+      if (err instanceof FeatureNotIncludedError) return reply.status(403).send({ error: err.message })
+      throw err
+    }
+
+    const campaigns = await listScheduledAdCampaigns(session.phone)
+    return reply.send({ campaigns })
+  })
+
+  // User API: cancel a scheduled ad campaign
+  server.post('/api/ads/scheduled/:id/cancel', async (req: any, reply: any) => {
+    const token = req.headers['authorization']?.replace('Bearer ', '') || ''
+    if (!token) return reply.status(401).send({ error: 'No token provided' })
+
+    const session = await verifySession(token)
+    if (!session) return reply.status(401).send({ error: 'Invalid or expired session' })
+
+    try {
+      await requireFeature(session.phone, 'scheduled_publishing')
+      await requireFeature(session.phone, 'ad_campaigns')
+    } catch (err) {
+      if (err instanceof FeatureNotIncludedError) return reply.status(403).send({ error: err.message })
+      throw err
+    }
+
+    const { id } = req.params as { id: string }
+    const cancelled = await cancelScheduledAdCampaign(id, session.phone)
+    if (!cancelled) return reply.status(404).send({ error: 'Scheduled ad not found' })
+    return reply.send({ success: true })
+  })
+
   server.addHook('preHandler', adminAuthMiddleware)
 
   registerAdminAuthRoutes(server)
   registerAdminPackageRoutes(server)
+  registerAdminTopUpRoutes(server)
   registerAdminUserRoutes(server)
   registerAdminPaymentRoutes(server)
   registerAdminSettingsRoutes(server)
   registerAdminStatsRoutes(server)
   registerAdminAIProviderRoutes(server)
   registerAdminMetaSettingsRoutes(server)
+  registerAdminReportRoutes(server)
+  registerAdminAdminsRoutes(server)
+  registerAdminAuditRoutes(server)
+  registerAssistantRoutes(server)
   registerSupportRoutes(server)
   registerHealthRoutes(server)
   registerBillingRoutes(server)
@@ -201,6 +364,8 @@ async function main(): Promise<void> {
   registerSocialRoutes(server)
   registerCheckoutRoutes(server)
   registerChatRoutes(server)
+  registerBrandRoutes(server)
+  registerTopUpRoutes(server)
 
   server.get('/', async () => {
     return { status: 'ok', message: 'AI Instagram Agent is running' }

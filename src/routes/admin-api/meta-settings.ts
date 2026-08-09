@@ -2,12 +2,13 @@ import { FastifyInstance } from 'fastify'
 import { getMetaConfig, setMetaConfig, getAllMetaConfig, deleteMetaConfig } from '../../store.js'
 import { metaConfig } from '../../lib/metaConfig.js'
 import { fetchWithRetry } from '../../lib/http.js'
+import { guard } from './middleware.js'
 
 export async function registerAdminMetaSettingsRoutes(server: FastifyInstance): Promise<void> {
 
   // ---- Get all Meta config (grouped by category) ----
 
-  server.get('/api/admin/meta-settings', async (_req: any, reply: any) => {
+  server.get('/api/admin/meta-settings', guard('meta.view'), async (_req: any, reply: any) => {
     try {
       const config = await getAllMetaConfig()
 
@@ -39,7 +40,7 @@ export async function registerAdminMetaSettingsRoutes(server: FastifyInstance): 
 
   // ---- Get config by category ----
 
-  server.get('/api/admin/meta-settings/:category', async (req: any, reply: any) => {
+  server.get('/api/admin/meta-settings/:category', guard('meta.view'), async (req: any, reply: any) => {
     const { category } = req.params as { category: string }
     try {
       const config = await getMetaConfig(category)
@@ -55,7 +56,7 @@ export async function registerAdminMetaSettingsRoutes(server: FastifyInstance): 
 
   // ---- Update Meta config ----
 
-  server.put('/api/admin/meta-settings', async (req: any, reply: any) => {
+  server.put('/api/admin/meta-settings', guard('meta.update'), async (req: any, reply: any) => {
     const { category, key, value, isSensitive } = req.body as {
       category: string
       key: string
@@ -78,7 +79,7 @@ export async function registerAdminMetaSettingsRoutes(server: FastifyInstance): 
 
   // ---- Delete config entry ----
 
-  server.delete('/api/admin/meta-settings/:category/:key', async (req: any, reply: any) => {
+  server.delete('/api/admin/meta-settings/:category/:key', guard('meta.update'), async (req: any, reply: any) => {
     const { category, key } = req.params as { category: string; key: string }
     try {
       await deleteMetaConfig(decodeURIComponent(category), decodeURIComponent(key))
@@ -91,7 +92,7 @@ export async function registerAdminMetaSettingsRoutes(server: FastifyInstance): 
 
   // ---- Test all Meta connections ----
 
-  server.post('/api/admin/meta-settings/test', async (_req: any, reply: any) => {
+  server.post('/api/admin/meta-settings/test', guard('meta.update'), async (_req: any, reply: any) => {
     const results: Record<string, { ok: boolean; message: string; latencyMs: number }> = {}
     const start = Date.now()
 
@@ -167,7 +168,7 @@ export async function registerAdminMetaSettingsRoutes(server: FastifyInstance): 
 
   // ---- Test specific integration ----
 
-  server.post('/api/admin/meta-settings/test/:integration', async (req: any, reply: any) => {
+  server.post('/api/admin/meta-settings/test/:integration', guard('meta.update'), async (req: any, reply: any) => {
     const { integration } = req.params as { integration: string }
     const start = Date.now()
 

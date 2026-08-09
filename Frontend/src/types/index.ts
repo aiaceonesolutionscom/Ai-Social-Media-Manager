@@ -1,4 +1,4 @@
-export type PlatformId = 'instagram' | 'facebook' | 'whatsapp';
+export type PlatformId = 'instagram' | 'facebook' | 'whatsapp' | 'meta_ads';
 
 export type ConnectionStatus = 'connected' | 'disconnected' | 'pending' | 'error';
 
@@ -25,6 +25,17 @@ export interface PricingPackage {
   features: PackageFeature[];
   status: 'active' | 'inactive';
   users: number;
+  sortOrder: number;
+  billingPeriod?: 'monthly' | 'yearly';
+  yearlyPrice?: number;
+  setupType?: 'none' | 'standard' | 'premium';
+}
+
+export interface TopUpBundle {
+  id: string;
+  tokens: number;
+  price: number;
+  status: 'active' | 'inactive';
   sortOrder: number;
 }
 

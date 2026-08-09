@@ -5,6 +5,14 @@ import { Button } from '../components/ui/Button';
 import { Input } from '../components/ui/Input';
 import { notify } from '../components/ui/Toast';
 import { apiRequest, endpoints, ApiError } from '../utils/api';
+import { cn } from '../utils/cn';
+
+interface SupportReply {
+  id: string
+  role: string
+  body: string
+  createdAt: string
+}
 
 interface SupportTicket {
   id: string
@@ -13,6 +21,7 @@ interface SupportTicket {
   status: string
   priority: string
   createdAt: string
+  replies?: SupportReply[]
 }
 
 export function SupportPage() {
@@ -23,12 +32,20 @@ export function SupportPage() {
   const [message, setMessage] = React.useState('')
   const [submitting, setSubmitting] = React.useState(false)
   const [hasAccess, setHasAccess] = React.useState(true)
+  const [expanded, setExpanded] = React.useState<string | null>(null)
+  const [replies, setReplies] = React.useState<Record<string, SupportReply[]>>({})
+  const [replyText, setReplyText] = React.useState('')
+  const [sending, setSending] = React.useState(false)
 
   React.useEffect(() => {
     async function fetchTickets() {
       try {
         const data = await apiRequest<{ tickets: SupportTicket[] }>(endpoints.supportTickets)
-        setTickets(data.tickets || [])
+        const list = data.tickets || []
+        setTickets(list)
+        const replyMap: Record<string, SupportReply[]> = {}
+        list.forEach((t) => { replyMap[t.id] = t.replies || [] })
+        setReplies(replyMap)
       } catch (err) {
         if (err instanceof ApiError && err.status === 403) {
           setHasAccess(false)
@@ -61,6 +78,46 @@ export function SupportPage() {
       notify.error('Failed', (err as Error).message)
     } finally {
       setSubmitting(false)
+    }
+  }
+
+  const sendReply = async (ticketId: string) => {
+    if (!replyText.trim()) {
+      notify.error('Error', 'Reply message is required')
+      return
+    }
+    setSending(true)
+    try {
+      await apiRequest(endpoints.supportTicketReply(ticketId), {
+        method: 'POST',
+        body: JSON.stringify({ message: replyText.trim() }),
+      })
+      notify.success('Reply Sent', 'Your message has been added to the thread.')
+      const data = await apiRequest<{ tickets: SupportTicket[] }>(endpoints.supportTickets)
+      setTickets(data.tickets || [])
+      const list = data.tickets || []
+      const replyMap: Record<string, SupportReply[]> = {}
+      list.forEach((t) => { replyMap[t.id] = t.replies || [] })
+      setReplies(replyMap)
+      setReplyText('')
+    } catch (err) {
+      notify.error('Failed', (err as Error).message)
+    } finally {
+      setSending(false)
+    }
+  }
+
+  const toggleExpand = async (ticket: SupportTicket) => {
+    if (expanded === ticket.id) {
+      setExpanded(null)
+      return
+    }
+    setExpanded(ticket.id)
+    try {
+      const data = await apiRequest<{ ticket: SupportTicket }>(endpoints.supportTicket(ticket.id))
+      setReplies((prev) => ({ ...prev, [ticket.id]: data.ticket.replies || [] }))
+    } catch {
+      // ignore, fall back to already-loaded replies
     }
   }
 
@@ -130,21 +187,63 @@ export function SupportPage() {
             ) : (
               <div className="space-y-3">
                 {tickets.map((ticket) => (
-                  <Card key={ticket.id} className="p-4">
-                    <div className="flex items-start justify-between mb-2">
-                      <h4 className="font-medium">{ticket.subject}</h4>
-                      <span className={`rounded-full px-2 py-0.5 text-xs font-medium ${
-                        ticket.status === 'open' ? 'bg-green-100 text-green-700' :
-                        ticket.status === 'closed' ? 'bg-slate-100 text-slate-700' :
-                        'bg-amber-100 text-amber-700'
-                      }`}>
-                        {ticket.status}
-                      </span>
-                    </div>
-                    <p className="text-sm text-slate-500 line-clamp-2">{ticket.message}</p>
-                    <p className="text-xs text-slate-400 mt-2">
-                      {new Date(ticket.createdAt).toLocaleString()}
-                    </p>
+                  <Card key={ticket.id} className="p-4" hoverable>
+                    <button
+                      type="button"
+                      className="w-full text-left"
+                      onClick={() => toggleExpand(ticket)}
+                    >
+                      <div className="flex items-start justify-between mb-2">
+                        <h4 className="font-medium">{ticket.subject}</h4>
+                        <span className={`rounded-full px-2 py-0.5 text-xs font-medium ${
+                          ticket.status === 'open' ? 'bg-green-100 text-green-700' :
+                          ticket.status === 'replied' ? 'bg-amber-100 text-amber-700' :
+                          ticket.status === 'closed' ? 'bg-slate-100 text-slate-700' :
+                          'bg-slate-100 text-slate-700'
+                        }`}>
+                          {ticket.status}
+                        </span>
+                      </div>
+                      <p className="text-sm text-slate-500 line-clamp-2">{ticket.message}</p>
+                      <p className="text-xs text-slate-400 mt-2">
+                        {new Date(ticket.createdAt).toLocaleString()}
+                        {ticket.replies && ticket.replies.length > 0 && ` • ${ticket.replies.length} message${ticket.replies.length === 1 ? '' : 's'}`}
+                      </p>
+                    </button>
+
+                    {expanded === ticket.id && (
+                      <div className="mt-4 space-y-3 border-t border-slate-100 pt-4 dark:border-slate-800">
+                        {(replies[ticket.id] || []).map((r) => (
+                          <div
+                            key={r.id}
+                            className={cn(
+                              'rounded-xl border p-3',
+                              r.role === 'admin'
+                                ? 'border-indigo-200 bg-indigo-50 dark:border-indigo-500/30 dark:bg-indigo-500/10'
+                                : 'border-slate-200 bg-slate-50 dark:border-slate-700 dark:bg-slate-800/50'
+                            )}
+                          >
+                            <p className={cn('text-[11px] font-semibold uppercase tracking-wide', r.role === 'admin' ? 'text-indigo-500' : 'text-slate-400')}>
+                              {r.role === 'admin' ? 'Support Team' : 'You'}
+                            </p>
+                            <p className="mt-1 whitespace-pre-wrap text-sm text-slate-700 dark:text-slate-200">{r.body}</p>
+                            <p className="mt-1 text-xs text-slate-400">{new Date(r.createdAt).toLocaleString()}</p>
+                          </div>
+                        ))}
+                        <div className="flex gap-2">
+                          <textarea
+                            value={replyText}
+                            onChange={(e) => setReplyText(e.target.value)}
+                            placeholder="Type a reply..."
+                            rows={2}
+                            className="flex-1 rounded-lg border border-slate-300 px-3 py-2 text-sm dark:border-slate-600 dark:bg-slate-800"
+                          />
+                          <Button onClick={() => sendReply(ticket.id)} loading={sending} size="sm" className="self-end">
+                            Reply
+                          </Button>
+                        </div>
+                      </div>
+                    )}
                   </Card>
                 ))}
               </div>

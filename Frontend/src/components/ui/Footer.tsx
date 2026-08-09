@@ -23,9 +23,9 @@ const groups = [
 {
   title: 'Legal',
   links: [
-  { label: 'Terms of service', to: '/signup' },
-  { label: 'Privacy policy', to: '/signup' },
-  { label: 'Data processing', to: '/signup' }]
+  { label: 'Terms of service', to: '/terms' },
+  { label: 'Privacy policy', to: '/privacy' },
+  { label: 'Data processing', to: '/data-processing' }]
 
 }];
 

@@ -68,11 +68,26 @@ export const packages = pgTable('packages', {
   features: jsonb('features').notNull().default({}),
   isActive: boolean('is_active').notNull().default(true),
   sortOrder: integer('sort_order').notNull().default(0),
+  billingPeriod: text('billing_period').notNull().default('monthly'),
+  yearlyPriceCents: integer('yearly_price_cents').notNull().default(0),
+  setupType: text('setup_type').notNull().default('none'),
   createdAt: text('created_at').notNull(),
   updatedAt: text('updated_at').notNull(),
 }, (table) => [
   index('idx_packages_slug').on(table.slug),
   index('idx_packages_active').on(table.isActive),
+])
+
+export const topupBundles = pgTable('topup_bundles', {
+  id: text('id').primaryKey(),
+  tokens: integer('tokens').notNull(),
+  priceCents: integer('price_cents').notNull(),
+  isActive: boolean('is_active').notNull().default(true),
+  sortOrder: integer('sort_order').notNull().default(0),
+  createdAt: text('created_at').notNull(),
+  updatedAt: text('updated_at').notNull(),
+}, (table) => [
+  index('idx_topup_active').on(table.isActive),
 ])
 
 export const users = pgTable('users', {
@@ -144,6 +159,22 @@ export const adminConfig = pgTable('admin_config', {
   updatedAt: text('updated_at').notNull(),
 })
 
+export const adminUsers = pgTable('admin_users', {
+  id: text('id').primaryKey(),
+  email: text('email').unique().notNull(),
+  name: text('name'),
+  passwordHash: text('password_hash').notNull(),
+  role: text('role').notNull().default('admin'),
+  permissions: jsonb('permissions').notNull().default([]),
+  isActive: boolean('is_active').notNull().default(true),
+  createdBy: text('created_by'),
+  lastLoginAt: text('last_login_at'),
+  createdAt: text('created_at').notNull(),
+  updatedAt: text('updated_at').notNull(),
+}, (table) => [
+  index('idx_admin_users_email').on(table.email),
+])
+
 export const payments = pgTable('payments', {
   id: text('id').primaryKey(),
   phone: text('phone').notNull(),
@@ -174,6 +205,7 @@ export const adCampaigns = pgTable('ad_campaigns', {
   adSetId: text('ad_set_id'),
   adId: text('ad_id'),
   imageUrl: text('image_url'),
+  publishAt: text('publish_at'),
   createdAt: text('created_at').notNull(),
   updatedAt: text('updated_at').notNull(),
 }, (table) => [
@@ -264,6 +296,16 @@ export const supportTickets = pgTable('support_tickets', {
 }, (table) => [
   index('idx_support_phone').on(table.phone),
   index('idx_support_status').on(table.status),
+])
+
+export const supportReplies = pgTable('support_replies', {
+  id: text('id').primaryKey(),
+  ticketId: text('ticket_id').notNull(),
+  role: text('role').notNull().default('user'),
+  body: text('body').notNull(),
+  createdAt: text('created_at').notNull(),
+}, (table) => [
+  index('idx_support_replies_ticket').on(table.ticketId),
 ])
 
 // ---- Audit Logs ----

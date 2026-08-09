@@ -3,7 +3,8 @@ import { config } from '../config.js'
 import { verifySession } from '../lib/userAuth.js'
 import { connectAccount, getAccounts, disconnectAccount } from '../store.js'
 import { logger } from '../lib/logger.js'
-import { sendText } from '../lib/whatsapp.js'
+import { sendOtpTemplate, sendText } from '../lib/whatsapp.js'
+import { sendWelcomeMessage } from '../lib/welcome.js'
 import { generateOtp, storeOtp, verifyOtp, signState, verifyState } from '../lib/otp.js'
 import { requireFeature } from '../lib/packagePermissions.js'
 import { metaConfig } from '../lib/metaConfig.js'
@@ -87,7 +88,7 @@ export async function registerSocialRoutes(server: FastifyInstance): Promise<voi
     }
 
     const state = await signState(phone)
-    const scopes = 'pages_manage_posts,pages_read_engagement,instagram_basic,instagram_content_publish,pages_show_list'
+    const scopes = 'pages_manage_posts,pages_read_engagement,instagram_basic,instagram_content_publish,pages_show_list,ads_management,ads_read'
     const url = `https://www.facebook.com/v21.0/dialog/oauth?client_id=${getOAuthClientId()}&redirect_uri=${encodeURIComponent(getOAuthCallbackUrl())}&scope=${scopes}&state=${state}`
     return reply.redirect(url)
   })
@@ -144,6 +145,26 @@ export async function registerSocialRoutes(server: FastifyInstance): Promise<voi
         }
       }
 
+      // Connect the user's own Meta Ads account (if the granted token can see one).
+      // Falls back to the platform-level META_ADS_ACCOUNT_ID at campaign time if not available.
+      try {
+        const adAccountsRes = await fetch(`https://graph.facebook.com/v21.0/me/adaccounts?fields=name,account_id,account_status&access_token=${accessToken}`)
+        const adAccountsData = await adAccountsRes.json() as any
+        const active = (adAccountsData.data || []).find((a: any) => a.account_status === 1)
+        if (active) {
+          await connectAccount({
+            phone,
+            platform: 'meta_ads',
+            accountId: `act_${active.account_id}`,
+            accountName: active.name || 'Meta Ads Account',
+            accessToken,
+          })
+          logger.info({ phone, adAccount: active.account_id }, 'connected user Meta Ads account')
+        }
+      } catch (adErr) {
+        logger.warn({ error: (adErr as Error).message }, 'failed to connect user Meta Ads account (non-blocking)')
+      }
+
       return reply.redirect(`${config.frontendUrl}/connect?connected=facebook`)
     } catch (err: any) {
       logger.error({ error: err.message }, 'Facebook OAuth failed')
@@ -190,15 +211,22 @@ export async function registerSocialRoutes(server: FastifyInstance): Promise<voi
     const phone = await requireUser(req)
     if (!phone) return reply.status(401).send({ error: 'Unauthorized' })
 
+    try {
+      await requireFeature(phone, 'whatsapp_broadcast')
+    } catch (err: any) {
+      return reply.status(403).send({ error: err.message })
+    }
+
     const { phoneNumber } = req.body as { phoneNumber?: string }
-    if (!phoneNumber || !/^\d{7,15}$/.test(phoneNumber)) {
+    const normalizedNumber = phoneNumber?.trim() ?? ''
+    if (!normalizedNumber || !/^\+?\d{7,15}$/.test(normalizedNumber)) {
       return reply.status(400).send({ error: 'A valid phone number (7-15 digits) is required' })
     }
 
     if (!config.whatsapp.token || !config.whatsapp.phoneNumberId) {
       if (config.dev.enabled) {
         const code = generateOtp()
-        await storeOtp(phone, phoneNumber, code)
+        await storeOtp(phone, normalizedNumber, code)
         logger.info({ phone, devCode: code }, 'DEV MODE: WhatsApp OTP simulated (no WhatsApp configured)')
         return reply.send({ success: true, message: 'Verification code generated (dev mode)', devCode: code })
       }
@@ -206,10 +234,15 @@ export async function registerSocialRoutes(server: FastifyInstance): Promise<voi
     }
 
     const code = generateOtp()
-    await storeOtp(phone, phoneNumber, code)
+    await storeOtp(phone, normalizedNumber, code)
 
     try {
-      await sendText(phoneNumber, `Your EchoPost verification code is: ${code}. It expires in 5 minutes.`)
+      try {
+        await sendOtpTemplate(normalizedNumber, code)
+      } catch (templateErr: any) {
+        logger.warn({ phone, error: templateErr.message }, 'OTP template failed, falling back to free-form text (requires 24h session)')
+        await sendText(normalizedNumber, `Your EchoPost verification code is: ${code}. It expires in 5 minutes.`)
+      }
     } catch (err: any) {
       logger.error({ phone, error: err.message }, 'failed to send WhatsApp OTP')
       return reply.status(500).send({ error: `Failed to send verification code: ${err.message}` })
@@ -223,16 +256,23 @@ export async function registerSocialRoutes(server: FastifyInstance): Promise<voi
     const phone = await requireUser(req)
     if (!phone) return reply.status(401).send({ error: 'Unauthorized' })
 
-    const { phoneNumber, verificationCode } = req.body as { phoneNumber?: string; verificationCode?: string }
+    try {
+      await requireFeature(phone, 'whatsapp_broadcast')
+    } catch (err: any) {
+      return reply.status(403).send({ error: err.message })
+    }
 
-    if (!phoneNumber) {
+    const { phoneNumber, verificationCode } = req.body as { phoneNumber?: string; verificationCode?: string }
+    const normalizedNumber = phoneNumber?.trim() ?? ''
+
+    if (!normalizedNumber) {
       return reply.status(400).send({ error: 'Phone number is required' })
     }
     if (!verificationCode || !/^\d{6}$/.test(verificationCode)) {
       return reply.status(400).send({ error: 'A 6-digit verification code is required' })
     }
 
-    const result = await verifyOtp(phone, phoneNumber, verificationCode)
+    const result = await verifyOtp(phone, normalizedNumber, verificationCode)
     if (!result.valid) {
       return reply.status(400).send({ error: result.reason || 'Verification failed' })
     }
@@ -240,10 +280,13 @@ export async function registerSocialRoutes(server: FastifyInstance): Promise<voi
     await connectAccount({
       phone,
       platform: 'whatsapp',
-      accountId: phoneNumber,
-      accountName: `WhatsApp (${phoneNumber})`,
+      accountId: normalizedNumber,
+      accountName: `WhatsApp (${normalizedNumber})`,
       accessToken: '',
     })
+
+    // Greet the user on their verified number so they know the bot works from it.
+    await sendWelcomeMessage(normalizedNumber)
 
     return reply.send({ success: true, message: 'WhatsApp connected' })
   })

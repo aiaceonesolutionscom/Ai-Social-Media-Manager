@@ -6,6 +6,7 @@ import {
   getAIUsageStats, listAIUsageLogs,
 } from '../../store.js'
 import { providerManager } from '../../lib/ai/providerManager.js'
+import { guard } from './middleware.js'
 import type { AIProviderCategory } from '../../types.js'
 
 const VALID_CATEGORIES = ['stt', 'llm', 'image']
@@ -14,7 +15,7 @@ export async function registerAdminAIProviderRoutes(server: FastifyInstance): Pr
 
   // ---- Providers CRUD ----
 
-  server.get('/api/admin/ai-providers', async (req: any, reply: any) => {
+  server.get('/api/admin/ai-providers', guard('ai_providers.view'), async (req: any, reply: any) => {
     const { category } = req.query as { category?: AIProviderCategory }
     const providers = await listAIProviders(category as AIProviderCategory | undefined)
 
@@ -33,7 +34,7 @@ export async function registerAdminAIProviderRoutes(server: FastifyInstance): Pr
     return reply.send({ providers: grouped })
   })
 
-  server.get('/api/admin/ai-providers/active', async (_req: any, reply: any) => {
+  server.get('/api/admin/ai-providers/active', guard('ai_providers.view'), async (_req: any, reply: any) => {
     const stt = await getActiveAIProvider('stt')
     const llm = await getActiveAIProvider('llm')
     const image = await getActiveAIProvider('image')
@@ -44,7 +45,7 @@ export async function registerAdminAIProviderRoutes(server: FastifyInstance): Pr
     })
   })
 
-  server.get('/api/admin/ai-providers/:id', async (req: any, reply: any) => {
+  server.get('/api/admin/ai-providers/:id', guard('ai_providers.view'), async (req: any, reply: any) => {
     const { id } = req.params as { id: string }
     const provider = await getAIProvider(id)
     if (!provider) return reply.status(404).send({ error: 'Provider not found' })
@@ -56,7 +57,7 @@ export async function registerAdminAIProviderRoutes(server: FastifyInstance): Pr
     })
   })
 
-  server.post('/api/admin/ai-providers', async (req: any, reply: any) => {
+  server.post('/api/admin/ai-providers', guard('ai_providers.update'), async (req: any, reply: any) => {
     const { category, provider, displayName, apiKey, baseUrl, model, config: cfg } = req.body as {
       category: AIProviderCategory
       provider: string
@@ -92,7 +93,7 @@ export async function registerAdminAIProviderRoutes(server: FastifyInstance): Pr
     }
   })
 
-  server.put('/api/admin/ai-providers/:id', async (req: any, reply: any) => {
+  server.put('/api/admin/ai-providers/:id', guard('ai_providers.update'), async (req: any, reply: any) => {
     const { id } = req.params as { id: string }
     const patch = req.body as Partial<{
       provider: string
@@ -111,7 +112,7 @@ export async function registerAdminAIProviderRoutes(server: FastifyInstance): Pr
     }
   })
 
-  server.delete('/api/admin/ai-providers/:id', async (req: any, reply: any) => {
+  server.delete('/api/admin/ai-providers/:id', guard('ai_providers.update'), async (req: any, reply: any) => {
     const { id } = req.params as { id: string }
     try {
       await deleteAIProvider(id)
@@ -123,7 +124,7 @@ export async function registerAdminAIProviderRoutes(server: FastifyInstance): Pr
 
   // ---- Activate ----
 
-  server.post('/api/admin/ai-providers/:id/activate', async (req: any, reply: any) => {
+  server.post('/api/admin/ai-providers/:id/activate', guard('ai_providers.update'), async (req: any, reply: any) => {
     const { id } = req.params as { id: string }
     const provider = await getAIProvider(id)
     if (!provider) return reply.status(404).send({ error: 'Provider not found' })
@@ -139,7 +140,7 @@ export async function registerAdminAIProviderRoutes(server: FastifyInstance): Pr
 
   // ---- Test Connection ----
 
-  server.post('/api/admin/ai-providers/:id/test', async (req: any, reply: any) => {
+  server.post('/api/admin/ai-providers/:id/test', guard('ai_providers.update'), async (req: any, reply: any) => {
     const { id } = req.params as { id: string }
     const provider = await getAIProvider(id)
     if (!provider) return reply.status(404).send({ error: 'Provider not found' })
@@ -182,12 +183,12 @@ export async function registerAdminAIProviderRoutes(server: FastifyInstance): Pr
 
   // ---- Costs ----
 
-  server.get('/api/admin/ai-providers/costs', async (_req: any, reply: any) => {
+  server.get('/api/admin/ai-providers/costs', guard('ai_providers.view'), async (_req: any, reply: any) => {
     const costs = await listAICosts()
     return reply.send({ costs })
   })
 
-  server.put('/api/admin/ai-providers/costs', async (req: any, reply: any) => {
+  server.put('/api/admin/ai-providers/costs', guard('ai_providers.update'), async (req: any, reply: any) => {
     const { provider, category, costPer1MInputTokens, costPer1MOutputTokens, costPerImage, costPerAudioMinute } = req.body as {
       provider: string
       category: AIProviderCategory
@@ -211,7 +212,7 @@ export async function registerAdminAIProviderRoutes(server: FastifyInstance): Pr
 
   // ---- Stats & History ----
 
-  server.get('/api/admin/ai-providers/stats', async (req: any, reply: any) => {
+  server.get('/api/admin/ai-providers/stats', guard('ai_providers.view'), async (req: any, reply: any) => {
     const { from, to, category, providerId } = req.query as {
       from?: string; to?: string; category?: AIProviderCategory; providerId?: string
     }
@@ -219,7 +220,7 @@ export async function registerAdminAIProviderRoutes(server: FastifyInstance): Pr
     return reply.send(stats)
   })
 
-  server.get('/api/admin/ai-providers/history', async (req: any, reply: any) => {
+  server.get('/api/admin/ai-providers/history', guard('ai_providers.view'), async (req: any, reply: any) => {
     const { limit, offset, phone, providerId, category } = req.query as {
       limit?: string; offset?: string; phone?: string; providerId?: string; category?: AIProviderCategory
     }

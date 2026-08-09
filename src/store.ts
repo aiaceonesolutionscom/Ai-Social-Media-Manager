@@ -1,13 +1,13 @@
 import path from 'node:path'
 import fs from 'node:fs'
 import { randomUUID } from 'node:crypto'
-import { eq, desc, asc, and, sql } from 'drizzle-orm'
+import { eq, desc, asc, and, sql, inArray } from 'drizzle-orm'
 import { getDb, getPool } from './db.js'
-import { posts, messages, conversations, postEdits, userPreferences, brandProfile, packages, users, tokenTransactions, socialAccounts, adminConfig, payments, userSessions, adCampaigns, aiProviders, aiUsageLogs, aiProviderCosts, metaConfig, supportTickets, auditLogs, webhookEvents, scheduledPosts } from './db/schema.js'
+import { posts, messages, conversations, postEdits, userPreferences, brandProfile, packages, topupBundles, users, tokenTransactions, socialAccounts, adminConfig, adminUsers, payments, userSessions, adCampaigns, aiProviders, aiUsageLogs, aiProviderCosts, metaConfig, supportTickets, supportReplies, auditLogs, webhookEvents, scheduledPosts } from './db/schema.js'
 import { logger } from './lib/logger.js'
 import { storageDir } from './storage.js'
 import { encryptSecret, decryptSecret } from './lib/crypto.js'
-import type { AdCampaign, AdminConfig, AIProvider, AIProviderCategory, AIProviderInput, AIUsageLog, AICostConfig, BrandProfile, ConversationState, EditRecord, MessageRecord, MessageRole, MessageType, Package, Payment, Post, PostStage, SocialAccount, TokenTransaction, TokenTransactionType, User, UserPreferences } from './types.js'
+import type { AdCampaign, AdminConfig, AIProvider, AIProviderCategory, AIProviderInput, AIUsageLog, AICostConfig, BrandProfile, ConversationState, EditRecord, MessageRecord, MessageRole, MessageType, Package, Payment, Post, PostStage, SocialAccount, TokenTransaction, TokenTransactionType, TopUpBundle, User, UserPreferences } from './types.js'
 
 function postFromRow(row: typeof posts.$inferSelect): Post {
   const data = (row.data ?? {}) as Record<string, unknown>
@@ -105,6 +105,17 @@ export async function initStore(): Promise<void> {
     );
     CREATE INDEX IF NOT EXISTS idx_packages_slug ON packages(slug);
     CREATE INDEX IF NOT EXISTS idx_packages_active ON packages(is_active);
+
+    CREATE TABLE IF NOT EXISTS topup_bundles (
+      id TEXT PRIMARY KEY,
+      tokens INTEGER NOT NULL,
+      price_cents INTEGER NOT NULL,
+      is_active BOOLEAN NOT NULL DEFAULT true,
+      sort_order INTEGER NOT NULL DEFAULT 0,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_topup_active ON topup_bundles(is_active);
 
     CREATE TABLE IF NOT EXISTS users (
       phone TEXT PRIMARY KEY,
@@ -205,6 +216,7 @@ export async function initStore(): Promise<void> {
     );
     CREATE INDEX IF NOT EXISTS idx_ad_campaigns_phone ON ad_campaigns(phone);
     CREATE INDEX IF NOT EXISTS idx_ad_campaigns_status ON ad_campaigns(status);
+    ALTER TABLE ad_campaigns ADD COLUMN IF NOT EXISTS publish_at TEXT;
 
     CREATE TABLE IF NOT EXISTS ai_providers (
       id TEXT PRIMARY KEY,
@@ -279,6 +291,15 @@ export async function initStore(): Promise<void> {
     CREATE INDEX IF NOT EXISTS idx_support_phone ON support_tickets(phone);
     CREATE INDEX IF NOT EXISTS idx_support_status ON support_tickets(status);
 
+    CREATE TABLE IF NOT EXISTS support_replies (
+      id TEXT PRIMARY KEY,
+      ticket_id TEXT NOT NULL,
+      role TEXT NOT NULL DEFAULT 'user',
+      body TEXT NOT NULL,
+      created_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_support_replies_ticket ON support_replies(ticket_id);
+
     CREATE TABLE IF NOT EXISTS audit_logs (
       id TEXT PRIMARY KEY,
       actor TEXT NOT NULL,
@@ -329,8 +350,41 @@ export async function initStore(): Promise<void> {
   await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS oauth_provider TEXT`)
   await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS oauth_id TEXT`)
   await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS avatar_url TEXT`)
+  await pool.query(`ALTER TABLE packages ADD COLUMN IF NOT EXISTS billing_period TEXT NOT NULL DEFAULT 'monthly'`)
+  await pool.query(`ALTER TABLE packages ADD COLUMN IF NOT EXISTS yearly_price_cents INTEGER NOT NULL DEFAULT 0`)
+  await pool.query(`ALTER TABLE packages ADD COLUMN IF NOT EXISTS setup_type TEXT NOT NULL DEFAULT 'none'`)
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS admin_users (
+      id TEXT PRIMARY KEY,
+      email TEXT UNIQUE NOT NULL,
+      name TEXT,
+      password_hash TEXT NOT NULL,
+      role TEXT NOT NULL DEFAULT 'admin',
+      permissions JSONB NOT NULL DEFAULT '[]',
+      is_active BOOLEAN NOT NULL DEFAULT true,
+      created_by TEXT,
+      last_login_at TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    )
+  `)
+  await pool.query(`
+    DO $$
+    BEGIN
+      IF EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_name = 'admin_users' AND column_name = 'is_active' AND data_type = 'integer'
+      ) THEN
+        ALTER TABLE admin_users ALTER COLUMN is_active DROP DEFAULT;
+        ALTER TABLE admin_users ALTER COLUMN is_active TYPE BOOLEAN USING (is_active::int::boolean);
+        ALTER TABLE admin_users ALTER COLUMN is_active SET DEFAULT true;
+      END IF;
+    END $$;
+  `)
 
   await seedDefaultPackages()
+  await seedDefaultTopUpBundles()
+  await migratePackageFeatures()
 
   await seedDefaultAIProviders()
   await migrateMetaConfigFromEnv()
@@ -596,12 +650,15 @@ function packageFromRow(row: typeof packages.$inferSelect): Package {
     features: (row.features ?? {}) as Record<string, unknown>,
     isActive: row.isActive,
     sortOrder: row.sortOrder,
+    billingPeriod: (row.billingPeriod ?? 'monthly') as 'monthly' | 'yearly',
+    yearlyPriceCents: row.yearlyPriceCents ?? 0,
+    setupType: (row.setupType ?? 'none') as 'none' | 'standard' | 'premium',
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
   }
 }
 
-export async function createPackage(data: { name: string; slug: string; description?: string; priceCents: number; includedTokens: number; features?: Record<string, unknown>; sortOrder?: number }): Promise<Package> {
+export async function createPackage(data: { name: string; slug: string; description?: string; priceCents: number; includedTokens: number; features?: Record<string, unknown>; sortOrder?: number; billingPeriod?: 'monthly' | 'yearly'; yearlyPriceCents?: number; setupType?: 'none' | 'standard' | 'premium' }): Promise<Package> {
   const now = new Date().toISOString()
   const pkg: Package = {
     id: randomUUID(),
@@ -614,6 +671,9 @@ export async function createPackage(data: { name: string; slug: string; descript
     features: data.features || {},
     isActive: true,
     sortOrder: data.sortOrder || 0,
+    billingPeriod: data.billingPeriod || 'monthly',
+    yearlyPriceCents: data.yearlyPriceCents || 0,
+    setupType: data.setupType || 'none',
     createdAt: now,
     updatedAt: now,
   }
@@ -628,6 +688,9 @@ export async function createPackage(data: { name: string; slug: string; descript
     features: pkg.features as Record<string, unknown>,
     isActive: pkg.isActive,
     sortOrder: pkg.sortOrder,
+    billingPeriod: pkg.billingPeriod,
+    yearlyPriceCents: pkg.yearlyPriceCents,
+    setupType: pkg.setupType,
     createdAt: pkg.createdAt,
     updatedAt: pkg.updatedAt,
   })
@@ -673,6 +736,9 @@ export async function updatePackage(id: string, patch: Partial<Package>): Promis
     features: updated.features as Record<string, unknown>,
     isActive: updated.isActive,
     sortOrder: updated.sortOrder,
+    billingPeriod: updated.billingPeriod,
+    yearlyPriceCents: updated.yearlyPriceCents,
+    setupType: updated.setupType,
     updatedAt: updated.updatedAt,
   }).where(eq(packages.id, id))
   return updated
@@ -680,6 +746,103 @@ export async function updatePackage(id: string, patch: Partial<Package>): Promis
 
 export async function deletePackage(id: string): Promise<void> {
   await getDb().delete(packages).where(eq(packages.id, id))
+}
+
+// ---- Top-up Bundles ----
+
+const DEFAULT_TOP_UP_BUNDLES = [
+  { tokens: 200, priceCents: 600, sortOrder: 0 },
+  { tokens: 500, priceCents: 1400, sortOrder: 1 },
+  { tokens: 1000, priceCents: 2700, sortOrder: 2 },
+  { tokens: 2500, priceCents: 6500, sortOrder: 3 },
+]
+
+function topUpBundleFromRow(row: typeof topupBundles.$inferSelect): TopUpBundle {
+  return {
+    id: row.id,
+    tokens: row.tokens,
+    priceCents: row.priceCents,
+    isActive: row.isActive,
+    sortOrder: row.sortOrder,
+    createdAt: row.createdAt,
+    updatedAt: row.updatedAt,
+  }
+}
+
+async function seedDefaultTopUpBundles(): Promise<void> {
+  const existing = await listTopUpBundles()
+  if (existing.length > 0) return
+  const now = new Date().toISOString()
+  for (const bundle of DEFAULT_TOP_UP_BUNDLES) {
+    await getDb().insert(topupBundles).values({
+      id: randomUUID(),
+      tokens: bundle.tokens,
+      priceCents: bundle.priceCents,
+      isActive: true,
+      sortOrder: bundle.sortOrder,
+      createdAt: now,
+      updatedAt: now,
+    })
+  }
+  logger.info({ count: DEFAULT_TOP_UP_BUNDLES.length }, 'seeded default top-up bundles')
+}
+
+export async function listTopUpBundles(): Promise<TopUpBundle[]> {
+  const result = await getDb().select().from(topupBundles).orderBy(asc(topupBundles.sortOrder))
+  return result.map(topUpBundleFromRow)
+}
+
+export async function listActiveTopUpBundles(): Promise<TopUpBundle[]> {
+  const result = await getDb().select().from(topupBundles)
+    .where(eq(topupBundles.isActive, true))
+    .orderBy(asc(topupBundles.sortOrder))
+  return result.map(topUpBundleFromRow)
+}
+
+export async function getTopUpBundle(id: string): Promise<TopUpBundle | undefined> {
+  const result = await getDb().select().from(topupBundles).where(eq(topupBundles.id, id)).limit(1)
+  return result.length > 0 ? topUpBundleFromRow(result[0]) : undefined
+}
+
+export async function createTopUpBundle(data: { tokens: number; priceCents: number; sortOrder?: number }): Promise<TopUpBundle> {
+  const now = new Date().toISOString()
+  const bundle: TopUpBundle = {
+    id: randomUUID(),
+    tokens: data.tokens,
+    priceCents: data.priceCents,
+    isActive: true,
+    sortOrder: data.sortOrder || 0,
+    createdAt: now,
+    updatedAt: now,
+  }
+  await getDb().insert(topupBundles).values({
+    id: bundle.id,
+    tokens: bundle.tokens,
+    priceCents: bundle.priceCents,
+    isActive: bundle.isActive,
+    sortOrder: bundle.sortOrder,
+    createdAt: bundle.createdAt,
+    updatedAt: bundle.updatedAt,
+  })
+  return bundle
+}
+
+export async function updateTopUpBundle(id: string, patch: Partial<TopUpBundle>): Promise<TopUpBundle> {
+  const existing = await getTopUpBundle(id)
+  if (!existing) throw new Error(`Top-up bundle ${id} not found`)
+  const updated: TopUpBundle = { ...existing, ...patch, updatedAt: new Date().toISOString() }
+  await getDb().update(topupBundles).set({
+    tokens: updated.tokens,
+    priceCents: updated.priceCents,
+    isActive: updated.isActive,
+    sortOrder: updated.sortOrder,
+    updatedAt: updated.updatedAt,
+  }).where(eq(topupBundles.id, id))
+  return updated
+}
+
+export async function deleteTopUpBundle(id: string): Promise<void> {
+  await getDb().delete(topupBundles).where(eq(topupBundles.id, id))
 }
 
 // ---- User CRUD ----
@@ -842,13 +1005,20 @@ export async function getTransactions(phone: string, limit = 50): Promise<TokenT
   return result.map(tokenTxFromRow)
 }
 
+export async function listAllTokenTransactions(limit = 5000): Promise<TokenTransaction[]> {
+  const result = await getDb().select().from(tokenTransactions)
+    .orderBy(desc(tokenTransactions.createdAt))
+    .limit(limit)
+  return result.map(tokenTxFromRow)
+}
+
 // ---- Social Accounts ----
 
 async function socialAccountFromRow(row: typeof socialAccounts.$inferSelect): Promise<SocialAccount> {
   return {
     id: row.id,
     phone: row.phone,
-    platform: row.platform as 'instagram' | 'facebook' | 'whatsapp',
+    platform: row.platform as 'instagram' | 'facebook' | 'whatsapp' | 'meta_ads',
     accountId: row.accountId,
     accountName: row.accountName || '',
     accessToken: await decryptSecret(row.accessToken),
@@ -859,7 +1029,7 @@ async function socialAccountFromRow(row: typeof socialAccounts.$inferSelect): Pr
   }
 }
 
-export async function connectAccount(data: { phone: string; platform: 'instagram' | 'facebook' | 'whatsapp'; accountId: string; accountName?: string; accessToken: string; refreshToken?: string; tokenExpiresAt?: string }): Promise<SocialAccount> {
+export async function connectAccount(data: { phone: string; platform: 'instagram' | 'facebook' | 'whatsapp' | 'meta_ads'; accountId: string; accountName?: string; accessToken: string; refreshToken?: string; tokenExpiresAt?: string }): Promise<SocialAccount> {
   const account: SocialAccount = {
     id: randomUUID(),
     phone: data.phone,
@@ -894,7 +1064,7 @@ export async function getAccounts(phone: string): Promise<SocialAccount[]> {
   return Promise.all(result.map(socialAccountFromRow))
 }
 
-export async function getAccountByPlatform(phone: string, platform: 'instagram' | 'facebook' | 'whatsapp'): Promise<SocialAccount | undefined> {
+export async function getAccountByPlatform(phone: string, platform: 'instagram' | 'facebook' | 'whatsapp' | 'meta_ads'): Promise<SocialAccount | undefined> {
   const result = await getDb().select().from(socialAccounts)
     .where(and(eq(socialAccounts.phone, phone), eq(socialAccounts.platform, platform)))
     .limit(1)
@@ -977,14 +1147,14 @@ function paymentFromRow(row: typeof payments.$inferSelect): Payment {
     packageId: row.packageId || '',
     tokenCount: row.tokenCount,
     amountCents: row.amountCents,
-    type: row.type as 'subscription' | 'one_time' | 'token_purchase',
+    type: row.type as 'subscription' | 'one_time' | 'token_purchase' | 'topup',
     stripeSessionId: row.stripeSessionId || '',
     status: row.status as 'pending' | 'completed' | 'failed' | 'refunded',
     createdAt: row.createdAt,
   }
 }
 
-export async function createPayment(data: { phone: string; packageId?: string; tokenCount: number; amountCents: number; type: 'subscription' | 'one_time' | 'token_purchase'; stripeSessionId?: string }): Promise<Payment> {
+export async function createPayment(data: { phone: string; packageId?: string | null; tokenCount: number; amountCents: number; type: 'subscription' | 'one_time' | 'token_purchase' | 'topup'; stripeSessionId?: string }): Promise<Payment> {
   const payment: Payment = {
     id: randomUUID(),
     phone: data.phone,
@@ -1080,25 +1250,182 @@ export async function deleteUserSession(token: string): Promise<void> {
   await getDb().delete(userSessions).where(eq(userSessions.token, token))
 }
 
+export async function updateUserSessionsEmail(oldEmail: string, newEmail: string): Promise<void> {
+  await getDb().update(userSessions).set({ userEmail: newEmail }).where(eq(userSessions.userEmail, oldEmail))
+}
+
+// ---- Admin Users ----
+
+export interface AdminUserRow {
+  id: string
+  email: string
+  name: string
+  passwordHash: string
+  role: 'super_admin' | 'admin'
+  permissions: string[]
+  isActive: boolean
+  createdBy: string
+  lastLoginAt: string | null
+  createdAt: string
+  updatedAt: string
+}
+
+function adminUserFromRow(row: typeof adminUsers.$inferSelect): AdminUserRow {
+  return {
+    id: row.id,
+    email: row.email,
+    name: row.name || '',
+    passwordHash: row.passwordHash,
+    role: (row.role as AdminUserRow['role']) || 'admin',
+    permissions: Array.isArray(row.permissions) ? (row.permissions as string[]) : [],
+    isActive: row.isActive === true,
+    createdBy: row.createdBy || '',
+    lastLoginAt: row.lastLoginAt || null,
+    createdAt: row.createdAt,
+    updatedAt: row.updatedAt,
+  }
+}
+
+export async function listAdminUsers(): Promise<AdminUserRow[]> {
+  const result = await getDb().select().from(adminUsers).orderBy(asc(adminUsers.createdAt))
+  return result.map(adminUserFromRow)
+}
+
+export async function getAdminUserByEmail(email: string): Promise<AdminUserRow | undefined> {
+  const result = await getDb().select().from(adminUsers).where(eq(adminUsers.email, email.toLowerCase())).limit(1)
+  if (result.length === 0) return undefined
+  return adminUserFromRow(result[0])
+}
+
+export async function getAdminUser(id: string): Promise<AdminUserRow | undefined> {
+  const result = await getDb().select().from(adminUsers).where(eq(adminUsers.id, id)).limit(1)
+  if (result.length === 0) return undefined
+  return adminUserFromRow(result[0])
+}
+
+export async function createAdminUser(data: {
+  email: string
+  name: string
+  passwordHash: string
+  role?: 'super_admin' | 'admin'
+  permissions?: string[]
+  createdBy?: string
+}): Promise<AdminUserRow> {
+  const now = new Date().toISOString()
+  const id = randomUUID()
+  await getDb().insert(adminUsers).values({
+    id,
+    email: data.email.toLowerCase(),
+    name: data.name,
+    passwordHash: data.passwordHash,
+    role: data.role || 'admin',
+    permissions: data.permissions || [],
+    isActive: true,
+    createdBy: data.createdBy || '',
+    lastLoginAt: null,
+    createdAt: now,
+    updatedAt: now,
+  })
+  return (await getAdminUser(id))!
+}
+
+export async function updateAdminUser(id: string, patch: Partial<Omit<AdminUserRow, 'id' | 'createdAt'>>): Promise<AdminUserRow> {
+  const existing = await getAdminUser(id)
+  if (!existing) throw new Error(`Admin ${id} not found`)
+  const updated: AdminUserRow = { ...existing, ...patch, updatedAt: new Date().toISOString() }
+  await getDb().update(adminUsers).set({
+    email: updated.email,
+    name: updated.name,
+    passwordHash: updated.passwordHash,
+    role: updated.role,
+    permissions: updated.permissions,
+    isActive: updated.isActive,
+    createdBy: updated.createdBy,
+    lastLoginAt: updated.lastLoginAt,
+    updatedAt: updated.updatedAt,
+  }).where(eq(adminUsers.id, id))
+  return updated
+}
+
+export async function deleteAdminUser(id: string): Promise<void> {
+  await getDb().delete(adminUsers).where(eq(adminUsers.id, id))
+}
+
+export async function touchAdminLogin(id: string): Promise<void> {
+  await getDb().update(adminUsers).set({ lastLoginAt: new Date().toISOString() }).where(eq(adminUsers.id, id))
+}
+
+// ---- Audit Logs ----
+
+export async function listAuditLogs(opts: { actorType?: string; actor?: string; action?: string; limit?: number; offset?: number } = {}): Promise<Array<typeof auditLogs.$inferSelect>> {
+  const limit = opts.limit ?? 50
+  const offset = opts.offset ?? 0
+  const conditions = []
+  if (opts.actorType) conditions.push(eq(auditLogs.actorType, opts.actorType))
+  if (opts.actor) conditions.push(eq(auditLogs.actor, opts.actor))
+  if (opts.action) conditions.push(eq(auditLogs.action, opts.action))
+  const q = getDb().select().from(auditLogs)
+  if (conditions.length === 1) q.where(conditions[0])
+  if (conditions.length > 1) q.where(and(...conditions))
+  const result = await q.orderBy(desc(auditLogs.createdAt)).limit(limit).offset(offset)
+  return result
+}
+
+export async function countAuditLogs(opts: { actorType?: string; actor?: string; action?: string } = {}): Promise<number> {
+  const conditions = []
+  if (opts.actorType) conditions.push(eq(auditLogs.actorType, opts.actorType))
+  if (opts.actor) conditions.push(eq(auditLogs.actor, opts.actor))
+  if (opts.action) conditions.push(eq(auditLogs.action, opts.action))
+  const q = getDb().select({ count: sql<number>`count(*)::int` }).from(auditLogs)
+  if (conditions.length === 1) q.where(conditions[0])
+  if (conditions.length > 1) q.where(and(...conditions))
+  const result = await q
+  return result[0]?.count ?? 0
+}
+
 // ---- Package Seeding ----
 
-const DEFAULT_PACKAGES = [
-  { name: 'Facebook Only', slug: 'facebook-only', description: 'Perfect for Facebook-only creators', priceCents: 500, includedTokens: 15, sortOrder: 0,
-    features: { facebook_publishing: true, instagram_publishing: false, voice_transcription: true, scheduled_publishing: false, analytics_dashboard: false, priority_support: false }},
-  { name: 'Starter', slug: 'starter', description: 'Get started with social media automation', priceCents: 1500, includedTokens: 100, sortOrder: 1,
-    features: { facebook_publishing: true, instagram_publishing: true, voice_transcription: true, scheduled_publishing: false, analytics_dashboard: true, priority_support: false }},
-  { name: 'Pro', slug: 'pro', description: 'For professional content creators', priceCents: 2900, includedTokens: 1000, sortOrder: 2,
-    features: { facebook_publishing: true, instagram_publishing: true, whatsapp_broadcast: true, voice_transcription: true, scheduled_publishing: true, analytics_dashboard: true, priority_support: true }},
-  { name: 'Exclusive', slug: 'exclusive', description: 'Full access to all features', priceCents: 9900, includedTokens: 3000, sortOrder: 3,
-    features: { facebook_publishing: true, instagram_publishing: true, whatsapp_broadcast: true, voice_transcription: true, scheduled_publishing: true, analytics_dashboard: true, priority_support: true, ad_campaigns: true, custom_branding: true }},
+interface SeedPackage {
+  name: string
+  slug: string
+  description: string
+  priceCents: number
+  includedTokens: number
+  sortOrder: number
+  billingPeriod: 'monthly' | 'yearly'
+  yearlyPriceCents: number
+  setupType: 'none' | 'standard' | 'premium'
+  features: Record<string, boolean>
+}
+
+const DEFAULT_PACKAGES: SeedPackage[] = [
+  { name: 'Facebook Only', slug: 'facebook-only', description: 'Perfect for Facebook-only creators', priceCents: 500, includedTokens: 15, sortOrder: 0, billingPeriod: 'monthly', yearlyPriceCents: 0, setupType: 'none', features: { facebook_publishing: true, instagram_publishing: false, whatsapp_broadcast: false, web_chat: false, voice_transcription: true, scheduled_publishing: false, analytics_dashboard: false, priority_support: false, ad_campaigns: false, custom_branding: false } },
+  { name: 'Starter', slug: 'starter', description: 'Get started with social media automation', priceCents: 1500, includedTokens: 100, sortOrder: 1, billingPeriod: 'monthly', yearlyPriceCents: 0, setupType: 'none', features: { facebook_publishing: true, instagram_publishing: true, whatsapp_broadcast: false, web_chat: false, voice_transcription: true, scheduled_publishing: false, analytics_dashboard: true, priority_support: false, ad_campaigns: false, custom_branding: false } },
+  { name: 'Pro', slug: 'pro', description: 'For professional content creators', priceCents: 2900, includedTokens: 1000, sortOrder: 2, billingPeriod: 'monthly', yearlyPriceCents: 0, setupType: 'none', features: { facebook_publishing: true, instagram_publishing: true, whatsapp_broadcast: true, web_chat: true, voice_transcription: true, scheduled_publishing: true, analytics_dashboard: true, priority_support: true, ad_campaigns: true, custom_branding: false } },
+  { name: 'Exclusive', slug: 'exclusive', description: 'Full access to all features', priceCents: 9900, includedTokens: 3000, sortOrder: 3, billingPeriod: 'monthly', yearlyPriceCents: 0, setupType: 'none', features: { facebook_publishing: true, instagram_publishing: true, whatsapp_broadcast: true, web_chat: true, voice_transcription: true, scheduled_publishing: true, analytics_dashboard: true, priority_support: true, ad_campaigns: true, custom_branding: true } },
 ]
 
+const CANONICAL_FEATURE_KEYS = [
+  'facebook_publishing',
+  'instagram_publishing',
+  'whatsapp_broadcast',
+  'web_chat',
+  'voice_transcription',
+  'scheduled_publishing',
+  'analytics_dashboard',
+  'priority_support',
+  'ad_campaigns',
+  'custom_branding',
+]
+
+const LEGACY_FEATURE_MAP: Record<string, string> = {
+  whatsapp_broadcasts: 'whatsapp_broadcast',
+}
+
 async function seedDefaultPackages(): Promise<void> {
-  const existing = await listPackages()
-  if (existing.length > 0) return
   const now = new Date().toISOString()
   for (const pkg of DEFAULT_PACKAGES) {
-    await getDb().insert(packages).values({
+    const row = {
       id: randomUUID(),
       name: pkg.name,
       slug: pkg.slug,
@@ -1109,11 +1436,73 @@ async function seedDefaultPackages(): Promise<void> {
       features: pkg.features as Record<string, unknown>,
       isActive: true,
       sortOrder: pkg.sortOrder,
+      billingPeriod: pkg.billingPeriod,
+      yearlyPriceCents: pkg.yearlyPriceCents,
+      setupType: pkg.setupType,
       createdAt: now,
       updatedAt: now,
-    })
+    }
+    await getDb().insert(packages).values(row).onConflictDoNothing({ target: packages.slug }).execute()
+    await getDb().update(packages).set({
+      billingPeriod: pkg.billingPeriod,
+      yearlyPriceCents: pkg.yearlyPriceCents,
+      setupType: pkg.setupType,
+    }).where(eq(packages.slug, pkg.slug))
   }
   logger.info({ count: DEFAULT_PACKAGES.length }, 'seeded default packages')
+}
+
+/**
+ * One-time migration that repairs stale/legacy package feature data:
+ * - Default packages are reset to the canonical DEFAULT_PACKAGES config.
+ * - Any package (custom too) gets unknown keys dropped and legacy aliases
+ *   (e.g. whatsapp_broadcasts -> whatsapp_broadcast) merged, so the canonical
+ *   feature set is always explicit and feature gating works correctly.
+ * Guarded by an admin_config marker so it only runs once and later admin
+ * edits are never clobbered on restart.
+ */
+async function migratePackageFeatures(): Promise<void> {
+  const marker = await getConfig('package_features_migration')
+  if (marker === 'v1') return
+
+  const defaultsBySlug = new Map(DEFAULT_PACKAGES.map((p) => [p.slug, p.features]))
+  const rows = await getDb().select().from(packages)
+  let updated = 0
+
+  for (const row of rows) {
+    const raw = (row.features ?? {}) as Record<string, unknown>
+    let normalized: Record<string, boolean>
+
+    if (defaultsBySlug.has(row.slug)) {
+      normalized = { ...defaultsBySlug.get(row.slug)! }
+    } else {
+      const merged: Record<string, unknown> = { ...raw }
+      for (const [legacy, canonical] of Object.entries(LEGACY_FEATURE_MAP)) {
+        if (legacy in merged) {
+          merged[canonical] = merged[legacy]
+          delete merged[legacy]
+        }
+      }
+      normalized = Object.fromEntries(CANONICAL_FEATURE_KEYS.map((k) => [k, merged[k] === true]))
+    }
+
+    const needsUpdate =
+      JSON.stringify(raw) !== JSON.stringify(normalized) ||
+      Object.keys(raw).length !== Object.keys(normalized).length
+
+    if (needsUpdate) {
+      await getDb().update(packages).set({
+        features: normalized as unknown as Record<string, unknown>,
+        updatedAt: new Date().toISOString(),
+      }).where(eq(packages.id, row.id))
+      updated++
+    }
+  }
+
+  if (updated > 0) {
+    logger.info({ updated }, 'migrated package features to canonical keys')
+  }
+  await setConfig('package_features_migration', 'v1')
 }
 
 // ---- AI Provider Seeding (from env vars) ----
@@ -1279,6 +1668,7 @@ function adCampaignFromRow(row: typeof adCampaigns.$inferSelect): AdCampaign {
     adSetId: row.adSetId || undefined,
     adId: row.adId || undefined,
     imageUrl: row.imageUrl || undefined,
+    publishAt: row.publishAt || undefined,
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
   }
@@ -1293,6 +1683,7 @@ export async function createAdCampaign(data: {
   targeting: AdCampaign['targeting']
   budgetCents: number
   imageUrl?: string
+  publishAt?: string
 }): Promise<AdCampaign> {
   const now = new Date().toISOString()
   const campaign: AdCampaign = {
@@ -1301,11 +1692,12 @@ export async function createAdCampaign(data: {
     postId: data.postId,
     name: data.name,
     objective: data.objective,
-    status: 'pending',
+    status: data.publishAt ? 'scheduled' : 'pending',
     adContent: data.adContent,
     targeting: data.targeting,
     budgetCents: data.budgetCents,
     imageUrl: data.imageUrl,
+    publishAt: data.publishAt,
     createdAt: now,
     updatedAt: now,
   }
@@ -1320,6 +1712,7 @@ export async function createAdCampaign(data: {
     targeting: campaign.targeting as unknown as Record<string, unknown>,
     budgetCents: campaign.budgetCents,
     imageUrl: campaign.imageUrl || null,
+    publishAt: campaign.publishAt || null,
     createdAt: campaign.createdAt,
     updatedAt: campaign.updatedAt,
   })
@@ -1339,6 +1732,33 @@ export async function listAdCampaignsByPhone(phone: string): Promise<AdCampaign[
   return result.map(adCampaignFromRow)
 }
 
+export async function listAllAdCampaigns(limit = 5000): Promise<AdCampaign[]> {
+  const result = await getDb().select().from(adCampaigns)
+    .orderBy(desc(adCampaigns.createdAt))
+    .limit(limit)
+  return result.map(adCampaignFromRow)
+}
+
+export async function listScheduledAdCampaigns(phone: string): Promise<AdCampaign[]> {
+  const userPhone = await resolveUserPhone(phone)
+  const result = await getDb().select().from(adCampaigns)
+    .where(and(
+      eq(adCampaigns.phone, userPhone),
+      sql`${adCampaigns.status} IN ('scheduled', 'creating')`,
+    ))
+    .orderBy(desc(adCampaigns.createdAt))
+  return result.map(adCampaignFromRow)
+}
+
+export async function cancelScheduledAdCampaign(id: string, phone: string): Promise<boolean> {
+  const userPhone = await resolveUserPhone(phone)
+  const rows = await getDb().update(adCampaigns)
+    .set({ status: 'cancelled', updatedAt: new Date().toISOString() })
+    .where(and(eq(adCampaigns.id, id), eq(adCampaigns.phone, userPhone), eq(adCampaigns.status, 'scheduled')))
+    .returning()
+  return rows.length > 0
+}
+
 export async function updateAdCampaign(id: string, patch: Partial<AdCampaign>): Promise<AdCampaign> {
   const existing = await getAdCampaign(id)
   if (!existing) throw new Error(`Ad campaign ${id} not found`)
@@ -1349,6 +1769,7 @@ export async function updateAdCampaign(id: string, patch: Partial<AdCampaign>): 
     adSetId: updated.adSetId || null,
     adId: updated.adId || null,
     imageUrl: updated.imageUrl || null,
+    publishAt: updated.publishAt || null,
     updatedAt: updated.updatedAt,
   }).where(eq(adCampaigns.id, id))
   return updated
@@ -1798,6 +2219,50 @@ export async function getAllSupportTickets() {
 export async function updateSupportTicket(id: string, patch: { status?: string; priority?: string }) {
   const now = new Date().toISOString()
   await getDb().update(supportTickets).set({ ...patch, updatedAt: now }).where(eq(supportTickets.id, id))
+}
+
+export async function getSupportTicket(id: string) {
+  const result = await getDb().select().from(supportTickets).where(eq(supportTickets.id, id)).limit(1)
+  return result.length > 0 ? supportTicketFromRow(result[0]) : undefined
+}
+
+export async function createSupportReply(data: { ticketId: string; role: 'admin' | 'user'; body: string }) {
+  const now = new Date().toISOString()
+  const id = randomUUID()
+  await getDb().insert(supportReplies).values({
+    id,
+    ticketId: data.ticketId,
+    role: data.role,
+    body: data.body,
+    createdAt: now,
+  })
+  await getDb().update(supportTickets).set({ updatedAt: now }).where(eq(supportTickets.id, data.ticketId))
+  return { id, ticketId: data.ticketId, role: data.role, body: data.body, createdAt: now }
+}
+
+export async function getSupportReplies(ticketId: string) {
+  const result = await getDb().select().from(supportReplies)
+    .where(eq(supportReplies.ticketId, ticketId))
+    .orderBy(asc(supportReplies.createdAt))
+  return result.map((r) => ({
+    id: r.id,
+    role: r.role,
+    body: r.body,
+    createdAt: r.createdAt,
+  }))
+}
+
+export async function listAllSupportReplies(ticketIds: string[]): Promise<Record<string, Array<{ id: string; role: string; body: string; createdAt: string }>>> {
+  if (ticketIds.length === 0) return {}
+  const result = await getDb().select().from(supportReplies)
+    .where(inArray(supportReplies.ticketId, ticketIds))
+    .orderBy(asc(supportReplies.createdAt))
+  const byTicket: Record<string, Array<{ id: string; role: string; body: string; createdAt: string }>> = {}
+  for (const r of result) {
+    if (!byTicket[r.ticketId]) byTicket[r.ticketId] = []
+    byTicket[r.ticketId].push({ id: r.id, role: r.role, body: r.body, createdAt: r.createdAt })
+  }
+  return byTicket
 }
 
 // ---- Audit Log Queries ----

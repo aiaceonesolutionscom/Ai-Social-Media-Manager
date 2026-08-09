@@ -1,4 +1,3 @@
-import React from 'react';
 import { motion } from 'framer-motion';
 import { CheckIcon, XIcon } from 'lucide-react';
 import type { PricingPackage } from '../../types';
@@ -14,6 +13,10 @@ interface PricingCardProps {
 }
 
 export function PricingCard({ pkg, onSelect, ctaLabel = 'Choose Plan', index = 0, selected = false }: PricingCardProps) {
+  const isYearly = pkg.billingPeriod === 'yearly';
+  const isSetup = pkg.setupType === 'standard' || pkg.setupType === 'premium';
+  const periodLabel = isSetup ? 'one-time' : isYearly ? '/year' : '/month';
+
   return (
     <motion.li
       initial={{ opacity: 0, y: 12 }}
@@ -30,15 +33,31 @@ export function PricingCard({ pkg, onSelect, ctaLabel = 'Choose Plan', index = 0
           Most Popular
         </span>
       }
+      {isYearly && !pkg.popular && (
+        <span className="absolute -top-3 right-6 rounded-full bg-emerald-600 px-3 py-1 text-xs font-bold text-white shadow-sm">
+          Save 2 months
+        </span>
+      )}
+      {isSetup && (
+        <span className="absolute -top-3 right-6 rounded-full bg-amber-500 px-3 py-1 text-xs font-bold text-white shadow-sm">
+          {pkg.setupType === 'premium' ? 'Premium' : 'Standard'}
+        </span>
+      )}
       <h3 className="text-base font-bold text-slate-900 dark:text-slate-50">{pkg.name}</h3>
       <p className="mt-1 text-sm text-slate-500">{pkg.description}</p>
       <p className="mt-5 flex items-baseline gap-1">
-        <span className="font-mono text-4xl font-bold text-slate-900 dark:text-slate-50">${pkg.price}</span>
-        <span className="text-sm text-slate-500">/month</span>
+        <span className="font-mono text-4xl font-bold text-slate-900 dark:text-slate-50">${pkg.price.toFixed(2)}</span>
+        <span className="text-sm text-slate-500">{periodLabel}</span>
       </p>
-      <p className="mt-2 font-mono text-sm font-semibold text-indigo-600 dark:text-indigo-300">
-        {pkg.tokens.toLocaleString()} tokens included
-      </p>
+      {isSetup ? (
+        <p className="mt-2 font-mono text-sm font-semibold text-amber-600 dark:text-amber-300">
+          One-time setup — no monthly billing
+        </p>
+      ) : (
+        <p className="mt-2 font-mono text-sm font-semibold text-indigo-600 dark:text-indigo-300">
+          {pkg.tokens.toLocaleString()} tokens included
+        </p>
+      )}
       <ul className="mt-6 flex-1 space-y-3">
         {pkg.features.map((feature) =>
         <li key={feature.label} className="flex items-start gap-2.5 text-sm">

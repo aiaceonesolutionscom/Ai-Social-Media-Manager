@@ -8,6 +8,7 @@ import { saveAudioBuffer } from '../storage.js'
 import { handleUserInput, handleVoiceInput, regeneratePost } from '../pipeline/conversation.js'
 import { cancelPublish, enqueuePublish } from '../pipeline/publish.js'
 import { checkUserAccess, sendAccessDenied } from '../lib/auth.js'
+import { checkPackageFeature } from '../lib/packagePermissions.js'
 import { metaConfig } from '../lib/metaConfig.js'
 import {
   getConversation,
@@ -128,6 +129,15 @@ export async function handleWebhook(req: unknown): Promise<{ status: number; bod
     return { status: 200, body: 'ok' }
   }
 
+  // WhatsApp channel gate: only users whose package enables whatsapp_broadcast
+  // may use the bot over WhatsApp. Others are told to use web chat or upgrade.
+  const waUserPhone = await resolveUserPhone(from)
+  const hasWhatsAppChannel = await checkPackageFeature(waUserPhone, 'whatsapp_broadcast')
+  if (!hasWhatsAppChannel) {
+    await sendAccessDenied(from, 'no_whatsapp')
+    return { status: 200, body: 'ok' }
+  }
+
   if (msg.type === 'interactive' && msg.interactive?.type === 'button_reply' && msg.interactive.button_reply) {
     const buttonId = msg.interactive.button_reply.id
     await logMessage({ phone: from, role: 'user', type: 'text', content: `[button] ${buttonId}`, waMsgId: msg.id })
@@ -141,7 +151,7 @@ export async function handleWebhook(req: unknown): Promise<{ status: number; bod
     if (user?.packageId) {
       const pkg = await getPackage(user.packageId)
       if (pkg?.features && (pkg.features as Record<string, boolean>).voice_transcription === false) {
-        await sendText(from, '❌ Voice transcription is not included in your package. Please upgrade to use this feature.')
+        await sendText(from, '❌ Voice-to-post transcription is not included in your package. Please type your message as text instead, or upgrade your plan to use voice notes.')
         return { status: 200, body: 'ok' }
       }
     }

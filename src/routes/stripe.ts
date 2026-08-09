@@ -2,6 +2,7 @@ import { FastifyInstance } from 'fastify'
 import { constructWebhookEvent } from '../lib/stripe.js'
 import { createUser, getPackage, createPayment, updatePayment } from '../store.js'
 import { grantTokens } from '../lib/tokens.js'
+import { clearFeatureCache } from '../lib/packagePermissions.js'
 import { sendWelcomeMessage } from '../lib/welcome.js'
 import { notifyNewUser, notifyPayment } from '../lib/notifications.js'
 import { logger } from '../lib/logger.js'
@@ -30,9 +31,37 @@ export async function registerStripeRoutes(server: FastifyInstance): Promise<voi
         const session = event.data.object
         const phone = session.metadata?.phone
         const packageId = session.metadata?.packageId
+        const kind = session.metadata?.kind || 'package'
 
-        if (!phone || !packageId) {
+        if (!phone) {
           logger.warn('checkout.session.completed missing metadata')
+          break
+        }
+
+        // Extra-credit top-up: grant tokens only, do NOT change the user's package.
+        if (kind === 'topup') {
+          const tokenCount = Number(session.metadata?.tokenCount) || 0
+          const existingUser = await import('../store.js').then(m => m.getUser(phone))
+          if (!existingUser) {
+            logger.warn({ phone }, 'top-up for unknown user')
+            break
+          }
+          if (tokenCount > 0) {
+            const { grantTokens } = await import('../lib/tokens.js')
+            await grantTokens(phone, tokenCount, 'stripe', `Top-up — ${tokenCount} tokens`)
+          }
+          const payment = await createPayment({
+            phone,
+            packageId: null,
+            tokenCount,
+            amountCents: session.amount_total || 0,
+            type: 'topup',
+            stripeSessionId: session.id,
+          })
+          await updatePayment(payment.id, { status: 'completed' })
+          const { notifyPayment } = await import('../lib/notifications.js')
+          await notifyPayment(phone, session.amount_total || 0, `${tokenCount} tokens`)
+          logger.info({ phone, tokenCount }, 'top-up completed via stripe webhook')
           break
         }
 
@@ -58,6 +87,7 @@ export async function registerStripeRoutes(server: FastifyInstance): Promise<voi
           })
 
           await updatePayment(payment.id, { status: 'completed' })
+          clearFeatureCache(phone)
 
           await sendWelcomeMessage(phone)
           await notifyNewUser(phone, user.name || phone, packageId)

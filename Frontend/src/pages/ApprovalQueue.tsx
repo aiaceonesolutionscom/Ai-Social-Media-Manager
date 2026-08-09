@@ -7,9 +7,12 @@ import { Button } from '../components/ui/Button';
 import { PostStatusBadge } from '../components/user/PostCard';
 import { notify } from '../components/ui/Toast';
 import { apiRequest, endpoints } from '../utils/api';
+import { Pagination } from '../components/ui/Pagination';
 import { useUserAuth } from '../contexts/UserAuthContext';
 import { formatDate } from '../utils/format';
 import type { PostStatus } from '../types';
+
+const PAGE_SIZE = 10;
 
 interface Post {
   id: string;
@@ -22,11 +25,12 @@ interface Post {
 
 export function ApprovalQueue() {
   const navigate = useNavigate();
-  const { user, isAuthenticated, loading: authLoading } = useUserAuth();
+  const { isAuthenticated, loading: authLoading } = useUserAuth();
   const [posts, setPosts] = React.useState<Post[]>([]);
   const [loading, setLoading] = React.useState(true);
-  const [tokens, setTokens] = React.useState(0);
-  const [totalTokens, setTotalTokens] = React.useState(0);
+  const [page, setPage] = React.useState(1);
+
+  const paginated = React.useMemo(() => posts.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE), [posts, page]);
 
   React.useEffect(() => {
     if (authLoading) return;
@@ -60,15 +64,8 @@ export function ApprovalQueue() {
     fetchData();
   }, [isAuthenticated, authLoading, navigate]);
 
-  React.useEffect(() => {
-    if (user) {
-      setTokens(user.tokensRemaining);
-      setTotalTokens(user.tokensRemaining + user.tokensUsed);
-    }
-  }, [user]);
-
   return (
-    <DashboardLayout tokens={tokens} totalTokens={totalTokens}>
+    <DashboardLayout>
       <header className="mb-8">
         <h1 className="text-2xl font-bold tracking-tight text-slate-900 dark:text-slate-50">Approval Queue</h1>
         <p className="mt-1 text-sm text-slate-500">Posts waiting for your approval before publishing.</p>
@@ -93,7 +90,7 @@ export function ApprovalQueue() {
         </Card>
       ) : (
         <div className="space-y-4">
-          {posts.map((post) => (
+          {paginated.map((post) => (
             <Card key={post.id} as="section" hoverable={false}>
               <div className="flex flex-col gap-4 sm:flex-row sm:items-center">
                 {post.imageUrl && (
@@ -126,6 +123,9 @@ export function ApprovalQueue() {
           ))}
         </div>
       )}
+      <div className="mt-6">
+        <Pagination page={page} total={posts.length} pageSize={PAGE_SIZE} onPageChange={setPage} />
+      </div>
     </DashboardLayout>
   );
 }

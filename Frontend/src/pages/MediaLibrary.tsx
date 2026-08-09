@@ -4,8 +4,11 @@ import { ImageIcon } from 'lucide-react';
 import { DashboardLayout } from '../components/layout/DashboardLayout';
 import { Card } from '../components/ui/Card';
 import { apiRequest, endpoints } from '../utils/api';
+import { Pagination } from '../components/ui/Pagination';
 import { useUserAuth } from '../contexts/UserAuthContext';
 import { formatDate } from '../utils/format';
+
+const PAGE_SIZE = 12;
 
 interface MediaItem {
   id: string;
@@ -16,11 +19,12 @@ interface MediaItem {
 
 export function MediaLibrary() {
   const navigate = useNavigate();
-  const { user, isAuthenticated, loading: authLoading } = useUserAuth();
+  const { isAuthenticated, loading: authLoading } = useUserAuth();
   const [media, setMedia] = React.useState<MediaItem[]>([]);
   const [loading, setLoading] = React.useState(true);
-  const [tokens, setTokens] = React.useState(0);
-  const [totalTokens, setTotalTokens] = React.useState(0);
+  const [page, setPage] = React.useState(1);
+
+  const paginated = React.useMemo(() => media.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE), [media, page]);
 
   React.useEffect(() => {
     if (authLoading) return;
@@ -52,15 +56,8 @@ export function MediaLibrary() {
     fetchData();
   }, [isAuthenticated, authLoading, navigate]);
 
-  React.useEffect(() => {
-    if (user) {
-      setTokens(user.tokensRemaining);
-      setTotalTokens(user.tokensRemaining + user.tokensUsed);
-    }
-  }, [user]);
-
   return (
-    <DashboardLayout tokens={tokens} totalTokens={totalTokens}>
+    <DashboardLayout>
       <header className="mb-8">
         <h1 className="text-2xl font-bold tracking-tight text-slate-900 dark:text-slate-50">Media Library</h1>
         <p className="mt-1 text-sm text-slate-500">All generated images from your posts.</p>
@@ -82,7 +79,7 @@ export function MediaLibrary() {
         </Card>
       ) : (
         <div className="grid grid-cols-2 gap-4 md:grid-cols-3 lg:grid-cols-4">
-          {media.map((item) => (
+          {paginated.map((item) => (
             <div key={item.id} className="group relative aspect-square overflow-hidden rounded-xl bg-slate-100">
               <img
                 src={item.imageUrl}
@@ -99,6 +96,9 @@ export function MediaLibrary() {
           ))}
         </div>
       )}
+      <div className="mt-6">
+        <Pagination page={page} total={media.length} pageSize={PAGE_SIZE} onPageChange={setPage} />
+      </div>
     </DashboardLayout>
   );
 }

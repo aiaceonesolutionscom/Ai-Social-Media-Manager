@@ -4,9 +4,10 @@ import { generateImage } from '../lib/image.js'
 import { saveImageBuffer } from '../storage.js'
 import { localFileUrl } from '../lib/whatsapp.js'
 import { generateAdContent, generateAdTargeting, suggestAdObjective } from './adGenerate.js'
-import { createAdCampaign, updateAdCampaign, getAdCampaign, getUser, getPackage, setConversation, getConversation, resolveUserPhone } from '../store.js'
+import { createAdCampaign, updateAdCampaign, getAdCampaign, getUser, getPackage, setConversation, getConversation, resolveUserPhone, getAccountByPlatform } from '../store.js'
 import { createCampaign, createAdSet, createAdCreative, createAd, boostPost } from '../lib/metaAds.js'
 import { deductTokens } from '../lib/tokens.js'
+import { parseScheduleTime } from './publish.js'
 import type { AdCampaign, AdContent, AdTargeting, ConversationState, Intent } from '../types.js'
 
 interface AdConversationState {
@@ -93,8 +94,30 @@ async function handleAdGathering(phone: string, content: string, convState: AdCo
   }
 }
 
+function looksLikeScheduleRequest(text: string): boolean {
+  return /\b(schedule|scheduling|later|tomorrow|tonight|kal|today at|in \d+ (min|minute|minutes|hour|hours|hr|hrs|day|days)|at \d|\d{1,2}(?::\d{2})?\s*(am|pm|a\.m\.|p\.m\.))\b/i.test(text)
+}
+
 async function handleAdPreview(phone: string, content: string, convState: AdConversationState): Promise<void> {
   const lower = content.toLowerCase().trim()
+
+  // Scheduling: "schedule for tomorrow 5pm", "kal 5 baje", "in 2 hours", etc.
+  if (looksLikeScheduleRequest(lower)) {
+    const iso = parseScheduleTime(lower)
+    if (iso) {
+      const campaignId = convState.campaignId
+      if (!campaignId) {
+        await sendText(phone, '❌ No ad campaign to schedule.')
+        return
+      }
+      await updateAdCampaign(campaignId, { status: 'scheduled', publishAt: iso })
+      await setConversation(phone, { kind: 'idle' })
+      await sendText(phone, `✅ Ad scheduled! Your ad campaign will launch on ${new Date(iso).toLocaleString()}.`)
+      return
+    }
+    await sendText(phone, '🕐 Sure! What time should the ad launch? For example: "tomorrow at 5pm", "in 2 hours", or "6:00 PM".')
+    return
+  }
 
   if (lower === 'approve' || lower === 'yes' || lower === 'publish') {
     await createAdCampaignOnMeta(phone, convState)
@@ -191,12 +214,19 @@ async function createAdCampaignOnMeta(phone: string, convState: AdConversationSt
     await sendText(phone, '❌ No campaign to publish.')
     return
   }
+  await launchAdCampaign(convState.campaignId)
+}
 
-  const campaign = await getAdCampaign(convState.campaignId)
+export async function launchAdCampaign(campaignId: string): Promise<void> {
+  const campaign = await getAdCampaign(campaignId)
   if (!campaign) {
-    await sendText(phone, '❌ Campaign not found.')
+    throw new Error('Campaign not found')
+  }
+  if (campaign.status === 'active' || campaign.status === 'cancelled' || campaign.status === 'failed') {
     return
   }
+
+  const phone = campaign.phone
 
   // Check tokens
   const userPhone = await resolveUserPhone(phone)
@@ -205,6 +235,7 @@ async function createAdCampaignOnMeta(phone: string, convState: AdConversationSt
     const canDeduct = await deductTokens(userPhone, 5, campaign.id, 'Ad campaign creation')
     if (!canDeduct) {
       await sendText(phone, '❌ Insufficient tokens for ad campaign. Each campaign costs 5 tokens.')
+      await updateAdCampaign(campaign.id, { status: 'failed' })
       return
     }
   }
@@ -213,9 +244,11 @@ async function createAdCampaignOnMeta(phone: string, convState: AdConversationSt
   await updateAdCampaign(campaign.id, { status: 'creating' })
 
   try {
-    // Check for real Meta Ads credentials
-    const metaAdsToken = process.env.META_ADS_ACCESS_TOKEN
-    const adAccountId = process.env.META_ADS_ACCOUNT_ID
+    // Prefer the user's own connected Meta Ads account, fall back to platform credentials.
+    const userAdAccount = await getAccountByPlatform(userPhone, 'meta_ads')
+    const userFbPage = await getAccountByPlatform(userPhone, 'facebook')
+    const metaAdsToken = userAdAccount?.accessToken || process.env.META_ADS_ACCESS_TOKEN
+    const adAccountId = userAdAccount?.accountId || process.env.META_ADS_ACCOUNT_ID
 
     if (!metaAdsToken || !adAccountId) {
       if (process.env.DEV_MODE === 'true') {
@@ -230,12 +263,30 @@ async function createAdCampaignOnMeta(phone: string, convState: AdConversationSt
         await setConversation(phone, { kind: 'idle' })
         return
       }
-      throw new Error('Meta Ads API not configured. Set META_ADS_ACCESS_TOKEN and META_ADS_ACCOUNT_ID.')
+      throw new Error('No Meta Ads account connected. Connect one in your dashboard, or ask admin to set META_ADS_ACCESS_TOKEN and META_ADS_ACCOUNT_ID.')
     }
 
-    // Create real campaign
+    // Create real campaign on the user's own ad account
     const fbAccountId = adAccountId
-    const pageId = process.env.FACEBOOK_PAGE_ID || ''
+    // The ad creative must belong to a Facebook Page. Prefer the user's own connected page,
+    // fall back to the platform-level FACEBOOK_PAGE_ID.
+    const pageId = userFbPage?.accountId || process.env.FACEBOOK_PAGE_ID || ''
+
+    // Convert LLM targeting shape ({ageMin, ageMax, genders, locations, interests})
+    // into the Meta Ads API targeting spec.
+    const t = campaign.targeting
+    const metaTargeting: Record<string, unknown> = {
+      age_min: t.ageMin ?? 18,
+      age_max: t.ageMax ?? 65,
+      genders: (t.genders ?? ['all']).map((g) => (g === 'male' ? 1 : g === 'female' ? 2 : 0)),
+      geo_locations: {
+        countries: Array.isArray(t.locations) ? t.locations : ['US'],
+      },
+      interests: Array.isArray(t.interests)
+        ? t.interests.slice(0, 5).map((name) => ({ name }))
+        : [],
+      publisher_platforms: ['facebook', 'instagram'],
+    }
 
     const result = await boostPost(fbAccountId, metaAdsToken, {
       name: campaign.name,
@@ -243,7 +294,8 @@ async function createAdCampaignOnMeta(phone: string, convState: AdConversationSt
       imageUrl: campaign.imageUrl || '',
       caption: campaign.adContent.primaryText,
       budgetCents: campaign.budgetCents,
-      targeting: campaign.targeting as unknown as Record<string, unknown>,
+      targeting: metaTargeting,
+      objective: campaign.objective,
     })
 
     await updateAdCampaign(campaign.id, {
@@ -253,7 +305,7 @@ async function createAdCampaignOnMeta(phone: string, convState: AdConversationSt
       adId: result.adId,
     })
 
-    await sendText(phone, `✅ **Ad Campaign Created!**\n\nCampaign ID: ${result.campaignId}\nAd Set ID: ${result.adSetId}\nAd ID: ${result.adId}\nStatus: ${result.status}\n\nYour ad is now live on Meta!`)
+    await sendText(phone, `✅ **Ad Campaign Created!**\n\nCampaign ID: ${result.campaignId}\nAd Set ID: ${result.adSetId}\nAd ID: ${result.adId}\nStatus: ${result.status}\n\nYour ad is created on your Meta Ads account and will start once it passes review. Track it in Meta Ads Manager.`)
     await setConversation(phone, { kind: 'idle' })
   } catch (err) {
     logger.error({ phone, error: (err as Error).message }, 'Meta Ads creation failed')

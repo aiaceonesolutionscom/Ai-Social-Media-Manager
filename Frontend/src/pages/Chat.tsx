@@ -6,7 +6,7 @@ import { Card } from '../components/ui/Card';
 import { Button } from '../components/ui/Button';
 import { RequireFeature } from '../components/RequireFeature';
 import { notify } from '../components/ui/Toast';
-import { apiRequest, endpoints } from '../utils/api';
+import { apiRequest, endpoints, API_URL } from '../utils/api';
 import { useUserAuth } from '../contexts/UserAuthContext';
 import { cn } from '../utils/cn';
 
@@ -16,6 +16,15 @@ interface ChatMessage {
   type: string;
   content: string;
   createdAt: string;
+}
+
+function parseImageContent(content: string): { src?: string; caption: string } {
+  const m = content.match(/^\[image ([^\]]+)\]\s*(.*)$/s);
+  if (m) {
+    const src = m[1].startsWith('http') ? m[1] : `${API_URL}${m[1]}`;
+    return { src, caption: m[2] };
+  }
+  return { caption: content };
 }
 
 function messageTime(iso: string): string {
@@ -31,16 +40,7 @@ export function Chat() {
   const [input, setInput] = React.useState('');
   const [sending, setSending] = React.useState(false);
   const [loading, setLoading] = React.useState(true);
-  const [tokens, setTokens] = React.useState(0);
-  const [totalTokens, setTotalTokens] = React.useState(0);
   const scrollRef = React.useRef<HTMLDivElement>(null);
-
-  React.useEffect(() => {
-    if (user) {
-      setTokens(user.tokensRemaining);
-      setTotalTokens(user.tokensRemaining + user.tokensUsed);
-    }
-  }, [user]);
 
   const loadMessages = React.useCallback(async () => {
     try {
@@ -88,7 +88,7 @@ export function Chat() {
   const awaitingReply = sending || (messages.length > 0 && messages[messages.length - 1].role === 'user');
 
   return (
-    <DashboardLayout tokens={tokens} totalTokens={totalTokens}>
+    <DashboardLayout>
       <RequireFeature phone={user?.phone || ''} feature="web_chat">
         <header className="mb-6">
           <h1 className="text-2xl font-bold tracking-tight text-slate-900 dark:text-slate-50">Chat</h1>
@@ -96,6 +96,9 @@ export function Chat() {
         </header>
 
         <Card as="section" hoverable={false} className="flex h-[calc(100vh-16rem)] min-h-[420px] flex-col">
+          <div className="flex items-center gap-2 border-b border-indigo-100 bg-indigo-50/60 px-4 py-2.5 text-xs text-indigo-700 dark:border-indigo-900/40 dark:bg-indigo-950/40 dark:text-indigo-300">
+            💡 Tip: Create a post, then type <span className="font-semibold">"schedule for tomorrow at 5pm"</span> to publish it later. The same works for ads.
+          </div>
           <div ref={scrollRef} className="flex-1 space-y-3 overflow-y-auto p-4">
             {loading ? (
               <div className="space-y-3">
@@ -121,9 +124,17 @@ export function Chat() {
                         : 'rounded-bl-md bg-slate-100 text-slate-800 dark:bg-slate-800 dark:text-slate-100',
                     )}
                   >
-                    {m.type === 'image' ? (
-                      <span className="italic opacity-80">🖼️ {m.content}</span>
-                    ) : (
+                    {m.type === 'image' ? (() => {
+                      const { src, caption } = parseImageContent(m.content);
+                      return src ? (
+                        <div className="max-w-[240px]">
+                          <img src={src} alt="AI generated post" className="rounded-lg border border-slate-200 dark:border-slate-700" />
+                          {caption && <p className="mt-1.5 whitespace-pre-wrap">{caption}</p>}
+                        </div>
+                      ) : (
+                        <span className="italic opacity-80">🖼️ {m.content}</span>
+                      );
+                    })() : (
                       m.content
                     )}
                     <div
