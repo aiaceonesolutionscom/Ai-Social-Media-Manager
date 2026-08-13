@@ -191,6 +191,26 @@ export async function adminLogout(token: string): Promise<void> {
   logger.info('admin logged out')
 }
 
+/**
+ * Immediately invalidate every live session for an admin (used when the admin is
+ * deactivated, deleted, demoted, or has their permissions changed). Prevents a
+ * stale 24h snapshot from keeping an account privileged after it is revoked.
+ */
+export async function invalidateAdminSessions(email: string): Promise<void> {
+  const sessions = await readSessions()
+  let changed = false
+  for (const [token, s] of Object.entries(sessions)) {
+    if (s.email === email) {
+      delete sessions[token]
+      changed = true
+    }
+  }
+  if (changed) {
+    await writeSessions(sessions)
+    logger.info({ email }, 'invalidated admin sessions')
+  }
+}
+
 export async function changeAdminPassword(email: string, oldPassword: string, newPassword: string): Promise<{ success: boolean; error?: string }> {
   const admin = await getAdminUserByEmail(email)
   if (!admin) {

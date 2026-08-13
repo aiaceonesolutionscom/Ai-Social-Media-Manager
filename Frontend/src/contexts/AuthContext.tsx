@@ -5,6 +5,7 @@ interface AuthState {
   isAuthenticated: boolean;
   isAdmin: boolean;
   adminEmail: string | null;
+  adminName: string | null;
   adminRole: string | null;
   adminPermissions: string[];
   loading: boolean;
@@ -17,6 +18,7 @@ const AuthContext = createContext<AuthState>({
   isAuthenticated: false,
   isAdmin: false,
   adminEmail: null,
+  adminName: null,
   adminRole: null,
   adminPermissions: [],
   loading: true,
@@ -29,6 +31,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [isAuthenticated, setIsAuthenticated] = useState(false);
   const [isAdmin, setIsAdmin] = useState(false);
   const [adminEmail, setAdminEmail] = useState<string | null>(null);
+  const [adminName, setAdminName] = useState<string | null>(null);
   const [adminRole, setAdminRole] = useState<string | null>(null);
   const [adminPermissions, setAdminPermissions] = useState<string[]>([]);
   const [loading, setLoading] = useState(true);
@@ -39,6 +42,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       setIsAuthenticated(false);
       setIsAdmin(false);
       setAdminEmail(null);
+      setAdminName(null);
       setAdminRole(null);
       setAdminPermissions([]);
       setLoading(false);
@@ -50,6 +54,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       setIsAuthenticated(true);
       setIsAdmin(true);
       setAdminEmail(data.email);
+      setAdminName(data.name || null);
       setAdminRole(data.role || null);
       setAdminPermissions(data.permissions || []);
     } catch {
@@ -57,6 +62,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       setIsAuthenticated(false);
       setIsAdmin(false);
       setAdminEmail(null);
+      setAdminName(null);
       setAdminRole(null);
       setAdminPermissions([]);
     } finally {
@@ -97,6 +103,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     setIsAuthenticated(false);
     setIsAdmin(false);
     setAdminEmail(null);
+    setAdminName(null);
     setAdminRole(null);
     setAdminPermissions([]);
   };
@@ -116,6 +123,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         isAuthenticated,
         isAdmin,
         adminEmail,
+        adminName,
         adminRole,
         adminPermissions,
         loading,

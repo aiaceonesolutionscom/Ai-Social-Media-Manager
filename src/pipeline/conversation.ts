@@ -26,6 +26,7 @@ import {
   setStage,
 } from '../store.js'
 import type { AgentDecision, ConversationState, Intent, Post } from '../types.js'
+import { auditLogger } from '../lib/AuditLogger.js'
 
 interface PlatformInfo {
   platforms: string[]
@@ -57,6 +58,25 @@ You help users create social media posts through natural conversation.
 You are friendly, warm, and human. You ask only ONE logical question at a time.
 Never overwhelm the user. Never ask for something already provided.
 Write your replies in the same natural, easy tone as the user.`
+
+// Cheap offline smalltalk/off-topic fast-path: recognizes greetings, thanks,
+// goodbyes and chit-chat so we do NOT spend an LLM call (tokens/money) on them.
+// Anything that could be a real request falls through to the LLM classifier.
+const SMALLTALK_PATTERN =
+  /\b(hi|hii+|hey|hello|yo|salam|salaam|assalam|namaste|good\s+(morning|afternoon|evening|night)|how\s+are\s+(you|u)|how('?s|s)\s+it\s+going|what'?s?\s+up|hru|sup|thank\s+(you|u)|thanks|thx|ty|welldone|nice|great|awesome|ok|okay|k|byee?|goodbye|bye|see\s+you|later|cya|haaha?|lol|rofl|no\s+problem|welcome)\b/i
+
+function matchSmalltalk(content: string): string | null {
+  const text = content.trim().toLowerCase()
+  if (!SMALLTALK_PATTERN.test(text)) return null
+  if (/\b(create|make|post|image|picture|photo|story|reel|caption|write|publish|schedule|ad|campaign|design|generate)\b/i.test(text)) return null
+  const greeting = /\b(hi|hii+|hey|hello|yo|salam|salaam|assalam|namaste|good\s+(morning|afternoon|evening|night))\b/i.test(text)
+  const thanks = /\b(thank\s+(you|u)|thanks|thx|ty)\b/i.test(text)
+  const farewell = /\b(byee?|goodbye|bye|see\s+you|later|cya)\b/i.test(text)
+  if (thanks) return 'You are welcome! 😊 Just tell me what you want to post about and I will create it for you.'
+  if (greeting) return 'Hi! 👋 How are you? What would you like to create today?'
+  if (farewell) return 'Goodbye! 👋 Message me anytime you want to create a post.'
+  return 'Got it! What would you like to create today?'
+}
 
 async function historyBlock(phone: string, limit = 12): Promise<string> {
   const msgs = (await getMessages(phone)).slice(-limit)
@@ -163,6 +183,30 @@ async function safeGenerateImage(prompt: string): Promise<Buffer> {
   throw lastErr
 }
 
+// Charge the configured image_regenerate cost before regenerating/editing an image.
+// Refund is handled by the caller on failure. Uses the canonical user phone.
+async function chargeImageRegenerate(phone: string, postId: string): Promise<boolean> {
+  const { tokenEngine } = await import('../lib/TokenEngine.js')
+  const userPhone = await resolveUserPhone(phone)
+  const estimate = await tokenEngine.estimate('image_regenerate', userPhone)
+  if (!estimate.canAfford) {
+    await safeSend(phone, `❌ You need ${estimate.cost} token${estimate.cost === 1 ? '' : 's'} to regenerate or edit the image. Please upgrade your plan or buy more tokens.`)
+    return false
+  }
+  const deduction = await tokenEngine.deduct('image_regenerate', userPhone, `Regenerate image: ${postId}`)
+  return deduction.success
+}
+
+async function refundImageRegenerate(phone: string, postId: string): Promise<void> {
+  const { tokenEngine } = await import('../lib/TokenEngine.js')
+  const userPhone = await resolveUserPhone(phone)
+  try {
+    await tokenEngine.refund('image_regenerate', userPhone, `Refund for failed image regenerate: ${postId}`)
+  } catch (err) {
+    logger.error({ err: (err as Error).message, postId }, 'failed to refund image regenerate tokens')
+  }
+}
+
 export async function sendPreview(phone: string, post: Post): Promise<void> {
   const pi = await getPlatformInfo(phone)
   const url = post.imageUrl!
@@ -229,6 +273,7 @@ async function runPipeline(phone: string, postId: string, sourceText: string, in
 
     await setStage(postId, 'AWAITING_APPROVAL')
     await setConversation(phone, { kind: 'awaiting_approval', postId })
+    await auditLogger.log({ actor: phone, actorType: 'user', action: 'post.create', target: await resolveUserPhone(phone), targetType: 'user', details: { postId } })
     await sendPreview(phone, (await getPost(postId))!)
   } catch (err) {
     try {
@@ -275,8 +320,14 @@ async function handleEdit(phone: string, postId: string, editRequest: string): P
     )
 
     if (decision.scope === 'full') {
+      const charged = await chargeImageRegenerate(phone, postId)
+      if (!charged) return
       await setStage(postId, 'INTENT')
       await runPipeline(phone, postId, post.transcript ?? post.content.caption, undefined)
+      const after = await getPost(postId)
+      if (after && after.status === 'FAILED') {
+        await refundImageRegenerate(phone, postId)
+      }
       return
     }
 
@@ -293,20 +344,28 @@ async function handleEdit(phone: string, postId: string, editRequest: string): P
     await setStage(postId, 'CHECKED', { content: finalContent, brandCheck: bc })
 
     if (decision.scope === 'image' || decision.imagePrompt) {
+      const charged = await chargeImageRegenerate(phone, postId)
+      if (!charged) return
       const prompt = decision.imagePrompt ?? (await generateImagePrompt(post.intent?.topic ?? '', finalContent.caption))
       await setStage(postId, 'IMAGE')
-      let imageBuffer = await safeGenerateImage(prompt)
-      if (hasBranding && (brand as any)?.logoPath) {
-        imageBuffer = await applyBrandLogo(imageBuffer, (brand as any).logoPath)
+      try {
+        let imageBuffer = await safeGenerateImage(prompt)
+        if (hasBranding && (brand as any)?.logoPath) {
+          imageBuffer = await applyBrandLogo(imageBuffer, (brand as any).logoPath)
+        }
+        const relPath = saveImageBuffer(imageBuffer, postId)
+        const url = localFileUrl(relPath)
+        await setStage(postId, 'IMAGE', { imagePath: relPath, imageUrl: url, imagePrompt: prompt })
+      } catch (err) {
+        await refundImageRegenerate(phone, postId)
+        throw err
       }
-      const relPath = saveImageBuffer(imageBuffer, postId)
-      const url = localFileUrl(relPath)
-      await setStage(postId, 'IMAGE', { imagePath: relPath, imageUrl: url, imagePrompt: prompt })
     }
 
     await saveEdit(postId, editRequest, JSON.stringify(finalContent))
     await setStage(postId, 'AWAITING_APPROVAL')
     await setConversation(phone, { kind: 'awaiting_approval', postId })
+    await auditLogger.log({ actor: phone, actorType: 'user', action: 'post.edit', target: await resolveUserPhone(phone), targetType: 'user', details: { postId, editRequest } })
     await sendPreview(phone, (await getPost(postId))!)
   } catch (err) {
     await setStage(postId, 'FAILED', { error: (err as Error).message })
@@ -385,6 +444,12 @@ export async function handleUserInput(
         logger.error({ phone, error: (err as Error).message }, 'URL analysis failed')
         await safeSend(phone, `❌ Could not analyze that website: ${(err as Error).message}\n\nTell me what the post should be about instead.`)
       }
+      return
+    }
+
+    const smalltalkReply = matchSmalltalk(content)
+    if (smalltalkReply) {
+      await safeSend(phone, smalltalkReply)
       return
     }
 
@@ -503,9 +568,15 @@ export async function regeneratePost(phone: string, postId: string): Promise<voi
     await safeSend(phone, "I don't have enough to regenerate from.")
     return
   }
+  const charged = await chargeImageRegenerate(phone, postId)
+  if (!charged) return
   await setConversation(phone, { kind: 'generating', postId })
   await safeSend(phone, '🔄 Regenerating your post...')
   await runPipeline(phone, postId, post.transcript, undefined)
+  const after = await getPost(postId)
+  if (after && after.status === 'FAILED') {
+    await refundImageRegenerate(phone, postId)
+  }
 }
 
 export function resetConversationState(): void {}

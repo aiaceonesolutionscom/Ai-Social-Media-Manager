@@ -1,4 +1,5 @@
 import { getUser, getPackage, resolveUserPhone } from '../store.js'
+import { isPackageExpired } from './packageLifecycle.js'
 
 const CACHE_TTL_MS = 30_000
 
@@ -37,6 +38,12 @@ export async function getUserFeatures(phone: string): Promise<Record<string, boo
   const userPhone = await resolveUserPhone(phone)
   const user = await getUser(userPhone)
   if (!user || !user.packageId) {
+    return {}
+  }
+
+  // Expired or manually-ended packages are locked — no features until renewed.
+  if (isPackageExpired(user)) {
+    setCachedFeatures(phone, {})
     return {}
   }
 

@@ -5,7 +5,7 @@ import { logger } from './logger.js'
 
 export interface AuditEntry {
   actor: string
-  actorType?: 'user' | 'admin'
+  actorType?: 'user' | 'admin' | 'system'
   action: string
   target?: string
   targetType?: string

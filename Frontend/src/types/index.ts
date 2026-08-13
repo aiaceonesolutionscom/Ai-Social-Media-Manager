@@ -72,6 +72,7 @@ export interface TokenTransaction {
 }
 
 export type PaymentStatus = 'succeeded' | 'pending' | 'refunded' | 'failed';
+export type PaymentMethod = 'stripe' | 'local' | 'gateway';
 
 export interface Payment {
   id: string;
@@ -80,6 +81,12 @@ export interface Payment {
   plan: string;
   amount: number;
   status: PaymentStatus;
+  method?: PaymentMethod;
+  referenceId?: string;
+  taxPercent?: number;
+  mdrPercent?: number;
+  taxAmount?: number;
+  mdrAmount?: number;
 }
 
 export interface ActivityItem {

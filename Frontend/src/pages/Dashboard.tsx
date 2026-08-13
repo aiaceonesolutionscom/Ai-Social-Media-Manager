@@ -22,7 +22,7 @@ const fallbackPosts: Post[] = [];
 
 export function Dashboard() {
   const navigate = useNavigate();
-  const { user, isAuthenticated, loading: authLoading } = useUserAuth();
+  const { user, isAuthenticated, loading: authLoading, endPackage } = useUserAuth();
   const [posts, setPosts] = React.useState<Post[]>(fallbackPosts);
   const [platforms, setPlatforms] = React.useState<Array<{ id: string; name: string; status: string; account?: string }>>([]);
   const [tokens, setTokens] = React.useState(0);
@@ -80,6 +80,7 @@ export function Dashboard() {
           facebook: 'facebook_publishing',
           instagram: 'instagram_publishing',
           meta_ads: 'ad_campaigns',
+          whatsapp: 'whatsapp_broadcast',
         };
 
         const ALL_PLATFORMS = [
@@ -164,6 +165,11 @@ export function Dashboard() {
           {user?.packageName && (
             <span className="mt-3 inline-flex items-center gap-2 rounded-full border border-indigo-200 bg-indigo-50 px-3 py-1 text-xs font-semibold text-indigo-700 dark:border-indigo-500/30 dark:bg-indigo-500/10 dark:text-indigo-300">
               Current plan: {user.packageName}
+              {user.packageExpiresAt && user.packageStatus === 'active' && (
+                <span className="font-normal text-indigo-500 dark:text-indigo-400">
+                  · Expires {formatDate(user.packageExpiresAt)}
+                </span>
+              )}
             </span>
           )}
         </div>
@@ -173,11 +179,44 @@ export function Dashboard() {
               Choose a plan
             </Button>
           )}
+          {user?.packageStatus === 'active' && (
+            <Button
+              variant="danger"
+              onClick={async () => {
+                if (!window.confirm('End your current package? Remaining tokens will be forfeited.')) return;
+                const result = await endPackage();
+                if (result.success) {
+                  notify.success('Package ended. You can now buy a new plan.');
+                } else {
+                  notify.error(result.error || 'Failed to end package');
+                }
+              }}>
+              End package
+            </Button>
+          )}
           <Button onClick={() => navigate('/packages')}>
             <CoinsIcon className="h-4 w-4" aria-hidden="true" /> Buy tokens
           </Button>
         </div>
       </header>
+
+      {(user?.packageStatus === 'expired' || user?.packageStatus === 'ended') && (
+        <section aria-labelledby="expired-package-heading" className="mb-8 rounded-2xl border border-amber-300 bg-gradient-to-br from-amber-50 to-white p-5 dark:border-amber-500/40 dark:from-amber-500/10 dark:to-slate-900">
+          <div className="flex flex-col items-start justify-between gap-4 sm:flex-row sm:items-center">
+            <div>
+              <h2 id="expired-package-heading" className="text-base font-bold text-slate-900 dark:text-slate-50">
+                Your package has {user?.packageStatus === 'expired' ? 'expired' : 'ended'}
+              </h2>
+              <p className="mt-1 text-sm text-slate-600 dark:text-slate-300">
+                Your features are locked. Renew a package to keep generating and publishing posts.
+              </p>
+            </div>
+            <Button onClick={() => navigate('/packages')}>
+              <CoinsIcon className="h-4 w-4" aria-hidden="true" /> Renew package
+            </Button>
+          </div>
+        </section>
+      )}
 
       {showGettingStarted && (
         <section aria-labelledby="getting-started-heading" className="mb-8 rounded-2xl border border-indigo-200 bg-gradient-to-br from-indigo-50 to-white p-6 dark:border-indigo-500/30 dark:from-indigo-500/10 dark:to-slate-900">

@@ -18,19 +18,19 @@ describe('Webhook message deduplication', () => {
   })
 
   it('ignores a re-delivered WhatsApp message with the same id', async () => {
-    await handleWebhook(makeTextPayload('Hi', 'wamid.dup1'))
+    await handleWebhook(makeTextPayload('What is the weather today?', 'wamid.dup1'))
     const afterFirst = (await listPosts()).length
     expect(chatJsonMock).toHaveBeenCalledTimes(1)
 
-    await handleWebhook(makeTextPayload('Hi', 'wamid.dup1'))
+    await handleWebhook(makeTextPayload('What is the weather today?', 'wamid.dup1'))
 
     expect(chatJsonMock).toHaveBeenCalledTimes(1)
     expect((await listPosts()).length).toBe(afterFirst)
   })
 
   it('processes distinct message ids normally', async () => {
-    await handleWebhook(makeTextPayload('Hi', 'wamid.a'))
-    await handleWebhook(makeTextPayload('Hello', 'wamid.b'))
+    await handleWebhook(makeTextPayload('What is the weather today?', 'wamid.a'))
+    await handleWebhook(makeTextPayload('What is the price of gold?', 'wamid.b'))
     expect(chatJsonMock).toHaveBeenCalledTimes(2)
   })
 })

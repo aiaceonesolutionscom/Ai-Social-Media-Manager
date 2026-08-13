@@ -8,14 +8,10 @@ import { TokenGrantForm, type TokenGrantValues } from '../../components/admin/To
 import { CreateUserForm, type CreateUserFormValues } from '../../components/admin/CreateUserForm';
 import { Modal } from '../../components/ui/Modal';
 import { Button } from '../../components/ui/Button';
-import { Badge } from '../../components/ui/Badge';
-import { DataTable, type Column } from '../../components/ui/DataTable';
-import { PostStatusBadge } from '../../components/user/PostCard';
 import { notify } from '../../components/ui/Toast';
 import { apiRequest, endpoints, ApiError, setAuthToken } from '../../utils/api';
 import { Pagination } from '../../components/ui/Pagination';
-import type { PlatformUser, Post, TokenTransaction } from '../../types';
-import { formatDate } from '../../utils/format';
+import type { PlatformUser } from '../../types';
 import { useAuth } from '../../contexts/AuthContext';
 
 const PAGE_SIZE = 10;
@@ -33,18 +29,6 @@ function fromApiUser(u: any): PlatformUser {
   };
 }
 
-const transactionColumns: Array<Column<TokenTransaction>> = [
-  { key: 'date', header: 'Date', render: (t) => <span className="whitespace-nowrap">{formatDate(t.date)}</span> },
-  { key: 'description', header: 'Description', render: (t) => t.description },
-  {
-    key: 'amount', header: 'Amount',
-    render: (t) => <span className={t.amount > 0 ? 'font-mono text-emerald-600' : 'font-mono text-slate-600 dark:text-slate-300'}>
-      {t.amount > 0 ? '+' : ''}{t.amount}
-    </span>
-  },
-  { key: 'balance', header: 'Balance', render: (t) => <span className="font-mono">{t.balance.toLocaleString()}</span> }
-];
-
 export function AdminUsers() {
   const navigate = useNavigate();
   const { hasPermission } = useAuth();
@@ -56,7 +40,6 @@ export function AdminUsers() {
   const [grantOpen, setGrantOpen] = React.useState(false);
   const [createOpen, setCreateOpen] = React.useState(false);
   const [pendingDelete, setPendingDelete] = React.useState<PlatformUser | null>(null);
-  const [userTransactions, setUserTransactions] = React.useState<TokenTransaction[]>([]);
   const [packages, setPackages] = React.useState<Array<{ id: string; name: string; tokens: number }>>([]);
 
   const fetchUsers = async () => {
@@ -149,20 +132,22 @@ export function AdminUsers() {
     setGrantOpen(false);
   };
 
-  const viewUser = async (user: PlatformUser) => {
-    setSelected(user);
-    try {
-      const data = await apiRequest<{ transactions: any[] }>(endpoints.adminUserTransactions(user.phone));
-      setUserTransactions(data.transactions.map((t: any) => ({
-        id: t.id,
-        date: t.createdAt?.split('T')[0] || '',
-        description: t.description,
-        amount: t.type === 'grant' ? t.amount : -t.amount,
-        balance: t.balanceAfter,
-      })));
-    } catch {
-      setUserTransactions([]);
+  React.useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const grant = params.get('grant');
+    if (grant) {
+      const user = users.find((u) => u.phone === grant);
+      if (user) {
+        setSelected(user);
+        setGrantOpen(true);
+      }
+      params.delete('grant');
+      window.history.replaceState({}, '', `${window.location.pathname}${params.toString() ? `?${params.toString()}` : ''}`);
     }
+  }, [users]);
+
+  const viewUser = async (user: PlatformUser) => {
+    navigate(`/admin/users/${user.phone}`);
   };
 
   const createUser = async (values: CreateUserFormValues) => {
@@ -220,56 +205,6 @@ export function AdminUsers() {
           <Pagination page={page} total={filtered.length} pageSize={PAGE_SIZE} onPageChange={setPage} />
         </>
       )}
-
-      <Modal open={selected !== null && !grantOpen} onClose={() => setSelected(null)} title={selected?.name ?? 'User'}
-        description={selected?.email} size="xl"
-        footer={selected && (
-          <>
-            {hasPermission('users.update') && (
-              <Button variant="secondary" onClick={() => setGrantOpen(true)}>Grant tokens</Button>
-            )}
-            {hasPermission('users.update') && (
-              <Button variant={selected.status === 'active' ? 'danger' : 'primary'} onClick={() => toggleStatus(selected)}>
-                {selected.status === 'active' ? 'Deactivate' : 'Reactivate'}
-              </Button>
-            )}
-            {hasPermission('users.delete') && (
-              <Button variant="danger" onClick={() => setPendingDelete(selected)}>Delete user</Button>
-            )}
-          </>
-        )}>
-        {selected && (
-          <div className="space-y-8">
-            <dl className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
-              {[
-                { label: 'Phone', value: selected.phone, mono: true },
-                { label: 'Email', value: selected.email || 'N/A' },
-                { label: 'Package', value: selected.packageName },
-                { label: 'Tokens', value: selected.tokens.toLocaleString(), mono: true },
-                { label: 'Joined', value: selected.joined },
-              ].map((item) => (
-                <div key={item.label} className="rounded-xl bg-slate-50 px-4 py-3 dark:bg-slate-800/60">
-                  <dt className="text-xs text-slate-500">{item.label}</dt>
-                  <dd className={item.mono ? 'font-mono text-sm font-semibold text-slate-900 dark:text-slate-50' : 'text-sm font-semibold text-slate-900 dark:text-slate-50'}>
-                    {item.value}
-                  </dd>
-                </div>
-              ))}
-              <div className="rounded-xl bg-slate-50 px-4 py-3 dark:bg-slate-800/60">
-                <dt className="text-xs text-slate-500">Status</dt>
-                <dd className="mt-1">
-                  <Badge tone={selected.status === 'active' ? 'emerald' : 'slate'}>{selected.status}</Badge>
-                </dd>
-              </div>
-            </dl>
-
-            <section aria-labelledby="tx-heading">
-              <h3 id="tx-heading" className="mb-3 text-sm font-bold text-slate-900 dark:text-slate-50">Token transactions</h3>
-              <DataTable columns={transactionColumns} rows={userTransactions} rowKey={(t) => t.id} caption="Token transactions for this user" emptyMessage="No transactions yet." />
-            </section>
-          </div>
-        )}
-      </Modal>
 
       <Modal open={grantOpen} onClose={() => setGrantOpen(false)} title="Grant tokens" description="Grants are recorded in the audit log." size="md">
         {selected && (

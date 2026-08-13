@@ -6,7 +6,7 @@ import { guard } from './middleware.js'
 
 export async function registerAdminAuditRoutes(server: FastifyInstance): Promise<void> {
   server.get('/api/admin/audit-logs', guard('logs.view'), async (req: any, reply: any) => {
-    const { action, actor, page = '1', limit = '50' } = req.query as Record<string, string>
+    const { action, actor, phone, page = '1', limit = '50' } = req.query as Record<string, string>
     const pageNum = Math.max(1, parseInt(page, 10) || 1)
     const limitNum = Math.min(200, Math.max(1, parseInt(limit, 10) || 50))
     const offset = (pageNum - 1) * limitNum
@@ -16,6 +16,7 @@ export async function registerAdminAuditRoutes(server: FastifyInstance): Promise
       const conditions: any[] = []
       if (action) conditions.push(eq(auditLogs.action, action))
       if (actor) conditions.push(like(auditLogs.actor, `%${actor}%`))
+      if (phone) conditions.push(like(auditLogs.target, `%${phone}%`))
 
       const where = conditions.length ? and(...conditions) : undefined
 

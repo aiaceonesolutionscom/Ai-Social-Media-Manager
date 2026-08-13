@@ -6,7 +6,7 @@ import { localFileUrl } from '../lib/whatsapp.js'
 import { generateAdContent, generateAdTargeting, suggestAdObjective } from './adGenerate.js'
 import { createAdCampaign, updateAdCampaign, getAdCampaign, getUser, getPackage, setConversation, getConversation, resolveUserPhone, getAccountByPlatform } from '../store.js'
 import { createCampaign, createAdSet, createAdCreative, createAd, boostPost } from '../lib/metaAds.js'
-import { deductTokens } from '../lib/tokens.js'
+import { deductTokens, getTokenCost } from '../lib/tokens.js'
 import { parseScheduleTime } from './publish.js'
 import type { AdCampaign, AdContent, AdTargeting, ConversationState, Intent } from '../types.js'
 
@@ -232,9 +232,10 @@ export async function launchAdCampaign(campaignId: string): Promise<void> {
   const userPhone = await resolveUserPhone(phone)
   const user = await getUser(userPhone)
   if (user) {
-    const canDeduct = await deductTokens(userPhone, 5, campaign.id, 'Ad campaign creation')
+    const adCost = await getTokenCost('ad_campaign')
+    const canDeduct = await deductTokens(userPhone, adCost, campaign.id, 'Ad campaign creation')
     if (!canDeduct) {
-      await sendText(phone, '❌ Insufficient tokens for ad campaign. Each campaign costs 5 tokens.')
+      await sendText(phone, `❌ Insufficient tokens for ad campaign. Each campaign costs ${adCost} tokens.`)
       await updateAdCampaign(campaign.id, { status: 'failed' })
       return
     }
@@ -314,7 +315,8 @@ export async function launchAdCampaign(campaignId: string): Promise<void> {
     // Refund tokens
     if (user) {
       const { refundTokens } = await import('../lib/tokens.js')
-      await refundTokens(userPhone, 5, campaign.id, 'Ad campaign failed - refund')
+      const adCost = await getTokenCost('ad_campaign')
+      await refundTokens(userPhone, adCost, campaign.id, 'Ad campaign failed - refund')
     }
     await setConversation(phone, { kind: 'idle' })
   }

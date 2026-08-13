@@ -22,6 +22,18 @@ const ALLOWED_SETTING_KEYS = new Set<string>([
   'cost_ad_campaign',
   'cost_voice_transcription',
   'cost_caption_editing',
+  'payment_method_stripe',
+  'payment_method_local',
+  'payment_local_auto',
+  'payment_local_pkr_rate',
+  'payment_local_details',
+  'checkout_tax_percent',
+  'checkout_mdr_percent',
+  'gateway_enabled',
+  'gateway_sandbox',
+  'gateway_api_base',
+  'gateway_api_key',
+  'gateway_webhook_secret',
 ])
 
 export async function registerAdminSettingsRoutes(server: FastifyInstance): Promise<void> {
@@ -30,7 +42,7 @@ export async function registerAdminSettingsRoutes(server: FastifyInstance): Prom
     const config = await getAllConfig()
     const safeConfig: Record<string, string> = {}
     for (const [key, value] of Object.entries(config)) {
-      if (key.includes('secret') || key.includes('password') || key.includes('token')) {
+      if (key === 'admin_sessions' || key.startsWith('wa_otp') || key.includes('secret') || key.includes('password') || key.includes('token')) {
         safeConfig[key] = value ? '••••••••' : ''
       } else {
         safeConfig[key] = value

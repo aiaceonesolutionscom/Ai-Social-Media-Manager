@@ -61,6 +61,7 @@ export function Login() {
           signUpUrl="/signup"
           appearance={{
             variables: { colorPrimary: '#6366f1', borderRadius: '10px' },
+            elements: { footer: 'hidden', previewMode: 'hidden' },
           }}
         />
         <button

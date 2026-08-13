@@ -2,6 +2,7 @@ import { FastifyInstance } from 'fastify'
 import { config } from '../config.js'
 import { createEmailUser, loginEmailUser, findOrCreateOAuthUser, verifySession, destroySession, createSession, hashPassword, comparePassword } from '../lib/userAuth.js'
 import { getUser, getUserByEmail, createUser, updateUser, getPackage, updateUserSessionsEmail } from '../store.js'
+import { endPackage } from '../lib/packageLifecycle.js'
 import { storageManager } from '../lib/StorageManager.js'
 import { rateLimit } from '../lib/ratelimit.js'
 import { verifyToken, createClerkClient } from '@clerk/backend'
@@ -74,6 +75,10 @@ export async function registerAuthRoutes(server: FastifyInstance): Promise<void>
       email: user.email,
       packageId: user.packageId,
       packageName: pkg?.name || '',
+      packageStatus: user.packageStatus,
+      packageStartedAt: user.packageStartedAt,
+      packageExpiresAt: user.packageExpiresAt,
+      packageEndedAt: user.packageEndedAt,
       tokensRemaining: user.tokensRemaining,
       tokensUsed: user.tokensUsed,
       avatarUrl: user.avatarUrl,
@@ -145,6 +150,10 @@ export async function registerAuthRoutes(server: FastifyInstance): Promise<void>
         email: user.email,
         packageId: user.packageId,
         packageName: pkg?.name || '',
+        packageStatus: user.packageStatus,
+        packageStartedAt: user.packageStartedAt,
+        packageExpiresAt: user.packageExpiresAt,
+        packageEndedAt: user.packageEndedAt,
         tokensRemaining: user.tokensRemaining,
         tokensUsed: user.tokensUsed,
         avatarUrl: user.avatarUrl,
@@ -176,6 +185,43 @@ export async function registerAuthRoutes(server: FastifyInstance): Promise<void>
 
     const user = await updateUser(phone, { avatarUrl })
     return reply.send({ success: true, avatarUrl, user })
+  })
+
+  server.post('/api/user/package/end', async (req: any, reply: any) => {
+    const phone = await requireSession(req, reply)
+    if (!phone) return
+
+    const user = await getUser(phone)
+    if (!user) return reply.status(404).send({ error: 'User not found' })
+
+    if (!user.packageId || user.packageStatus !== 'active') {
+      return reply.status(400).send({ error: 'You have no active package to end.' })
+    }
+
+    await endPackage(phone, { reason: 'ended from dashboard' })
+
+    const updated = await getUser(phone)
+    const pkg = updated?.packageId ? await getPackage(updated.packageId) : undefined
+    return reply.send({
+      success: true,
+      user: updated
+        ? {
+            phone: updated.phone,
+            name: updated.name,
+            email: updated.email,
+            packageId: updated.packageId,
+            packageName: pkg?.name || '',
+            packageStatus: updated.packageStatus,
+            packageStartedAt: updated.packageStartedAt,
+            packageExpiresAt: updated.packageExpiresAt,
+            packageEndedAt: updated.packageEndedAt,
+            tokensRemaining: updated.tokensRemaining,
+            tokensUsed: updated.tokensUsed,
+            avatarUrl: updated.avatarUrl,
+            oauthProvider: updated.oauthProvider,
+          }
+        : null,
+    })
   })
 
   server.put('/api/user/password', async (req: any, reply: any) => {

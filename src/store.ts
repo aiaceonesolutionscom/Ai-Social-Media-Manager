@@ -124,6 +124,10 @@ export async function initStore(): Promise<void> {
       role TEXT NOT NULL DEFAULT 'user',
       active INTEGER NOT NULL DEFAULT 1,
       package_id TEXT,
+      package_status TEXT NOT NULL DEFAULT 'none',
+      package_started_at TEXT,
+      package_expires_at TEXT,
+      package_ended_at TEXT,
       tokens_remaining INTEGER NOT NULL DEFAULT 0,
       tokens_used INTEGER NOT NULL DEFAULT 0,
       stripe_customer_id TEXT,
@@ -181,6 +185,10 @@ export async function initStore(): Promise<void> {
       package_id TEXT,
       token_count INTEGER NOT NULL,
       amount_cents INTEGER NOT NULL,
+      tax_percent INTEGER,
+      mdr_percent INTEGER,
+      tax_amount INTEGER,
+      mdr_amount INTEGER,
       type TEXT NOT NULL,
       stripe_session_id TEXT,
       status TEXT NOT NULL DEFAULT 'pending',
@@ -189,6 +197,10 @@ export async function initStore(): Promise<void> {
     CREATE INDEX IF NOT EXISTS idx_payments_phone ON payments(phone);
     CREATE INDEX IF NOT EXISTS idx_payments_status ON payments(status);
     CREATE INDEX IF NOT EXISTS idx_payments_stripe ON payments(stripe_session_id);
+    ALTER TABLE payments ADD COLUMN IF NOT EXISTS tax_percent INTEGER;
+    ALTER TABLE payments ADD COLUMN IF NOT EXISTS mdr_percent INTEGER;
+    ALTER TABLE payments ADD COLUMN IF NOT EXISTS tax_amount INTEGER;
+    ALTER TABLE payments ADD COLUMN IF NOT EXISTS mdr_amount INTEGER;
 
     CREATE TABLE IF NOT EXISTS user_sessions (
       token TEXT PRIMARY KEY,
@@ -350,9 +362,23 @@ export async function initStore(): Promise<void> {
   await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS oauth_provider TEXT`)
   await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS oauth_id TEXT`)
   await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS avatar_url TEXT`)
+  await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS package_status TEXT NOT NULL DEFAULT 'none'`)
+  await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS package_started_at TEXT`)
+  await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS package_expires_at TEXT`)
+  await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS package_ended_at TEXT`)
   await pool.query(`ALTER TABLE packages ADD COLUMN IF NOT EXISTS billing_period TEXT NOT NULL DEFAULT 'monthly'`)
   await pool.query(`ALTER TABLE packages ADD COLUMN IF NOT EXISTS yearly_price_cents INTEGER NOT NULL DEFAULT 0`)
   await pool.query(`ALTER TABLE packages ADD COLUMN IF NOT EXISTS setup_type TEXT NOT NULL DEFAULT 'none'`)
+  // Backfill: users that already own a package (bought before the lifecycle feature) get
+  // an active status and a fresh expiry based on the package billing period.
+  await pool.query(`
+    UPDATE users u
+    SET package_status = 'active',
+        package_started_at = NOW(),
+        package_expires_at = NOW() + CASE p.billing_period WHEN 'yearly' THEN INTERVAL '365 days' ELSE INTERVAL '31 days' END
+    FROM packages p
+    WHERE u.package_id = p.slug AND u.package_status = 'none'
+  `)
   await pool.query(`
     CREATE TABLE IF NOT EXISTS admin_users (
       id TEXT PRIMARY KEY,
@@ -855,6 +881,10 @@ function userFromRow(row: typeof users.$inferSelect): User {
     role: row.role as 'user' | 'admin',
     active: row.active,
     packageId: row.packageId || '',
+    packageStatus: (row.packageStatus as User['packageStatus']) || 'none',
+    packageStartedAt: row.packageStartedAt || '',
+    packageExpiresAt: row.packageExpiresAt || '',
+    packageEndedAt: row.packageEndedAt || '',
     tokensRemaining: row.tokensRemaining,
     tokensUsed: row.tokensUsed,
     stripeCustomerId: row.stripeCustomerId || '',
@@ -868,7 +898,7 @@ function userFromRow(row: typeof users.$inferSelect): User {
   }
 }
 
-export async function createUser(data: { phone: string; name?: string; email?: string; packageId?: string; tokensRemaining?: number; stripeCustomerId?: string; passwordHash?: string; oauthProvider?: string; oauthId?: string; avatarUrl?: string }): Promise<User> {
+export async function createUser(data: { phone: string; name?: string; email?: string; packageId?: string; packageStatus?: User['packageStatus']; packageStartedAt?: string; packageExpiresAt?: string; tokensRemaining?: number; stripeCustomerId?: string; passwordHash?: string; oauthProvider?: string; oauthId?: string; avatarUrl?: string }): Promise<User> {
   const now = new Date().toISOString()
   const user: User = {
     phone: data.phone,
@@ -877,6 +907,10 @@ export async function createUser(data: { phone: string; name?: string; email?: s
     role: 'user',
     active: 1,
     packageId: data.packageId || '',
+    packageStatus: data.packageStatus || 'none',
+    packageStartedAt: data.packageStartedAt || '',
+    packageExpiresAt: data.packageExpiresAt || '',
+    packageEndedAt: '',
     tokensRemaining: data.tokensRemaining || 0,
     tokensUsed: 0,
     stripeCustomerId: data.stripeCustomerId || '',
@@ -895,6 +929,10 @@ export async function createUser(data: { phone: string; name?: string; email?: s
     role: user.role,
     active: user.active,
     packageId: user.packageId,
+    packageStatus: user.packageStatus,
+    packageStartedAt: user.packageStartedAt || null,
+    packageExpiresAt: user.packageExpiresAt || null,
+    packageEndedAt: user.packageEndedAt || null,
     tokensRemaining: user.tokensRemaining,
     tokensUsed: user.tokensUsed,
     stripeCustomerId: user.stripeCustomerId,
@@ -930,6 +968,10 @@ export async function updateUser(phone: string, patch: Partial<User>): Promise<U
     role: updated.role,
     active: updated.active,
     packageId: updated.packageId,
+    packageStatus: updated.packageStatus,
+    packageStartedAt: updated.packageStartedAt || null,
+    packageExpiresAt: updated.packageExpiresAt || null,
+    packageEndedAt: updated.packageEndedAt || null,
     tokensRemaining: updated.tokensRemaining,
     tokensUsed: updated.tokensUsed,
     stripeCustomerId: updated.stripeCustomerId,
@@ -1147,6 +1189,10 @@ function paymentFromRow(row: typeof payments.$inferSelect): Payment {
     packageId: row.packageId || '',
     tokenCount: row.tokenCount,
     amountCents: row.amountCents,
+    taxPercent: row.taxPercent ?? 0,
+    mdrPercent: row.mdrPercent ?? 0,
+    taxAmount: row.taxAmount ?? 0,
+    mdrAmount: row.mdrAmount ?? 0,
     type: row.type as 'subscription' | 'one_time' | 'token_purchase' | 'topup',
     stripeSessionId: row.stripeSessionId || '',
     status: row.status as 'pending' | 'completed' | 'failed' | 'refunded',
@@ -1154,13 +1200,17 @@ function paymentFromRow(row: typeof payments.$inferSelect): Payment {
   }
 }
 
-export async function createPayment(data: { phone: string; packageId?: string | null; tokenCount: number; amountCents: number; type: 'subscription' | 'one_time' | 'token_purchase' | 'topup'; stripeSessionId?: string }): Promise<Payment> {
+export async function createPayment(data: { phone: string; packageId?: string | null; tokenCount: number; amountCents: number; type: 'subscription' | 'one_time' | 'token_purchase' | 'topup'; stripeSessionId?: string; taxPercent?: number; mdrPercent?: number; taxAmount?: number; mdrAmount?: number }): Promise<Payment> {
   const payment: Payment = {
     id: randomUUID(),
     phone: data.phone,
     packageId: data.packageId || '',
     tokenCount: data.tokenCount,
     amountCents: data.amountCents,
+    taxPercent: data.taxPercent ?? 0,
+    mdrPercent: data.mdrPercent ?? 0,
+    taxAmount: data.taxAmount ?? 0,
+    mdrAmount: data.mdrAmount ?? 0,
     type: data.type,
     stripeSessionId: data.stripeSessionId || '',
     status: 'pending',
@@ -1172,6 +1222,10 @@ export async function createPayment(data: { phone: string; packageId?: string | 
     packageId: payment.packageId,
     tokenCount: payment.tokenCount,
     amountCents: payment.amountCents,
+    taxPercent: payment.taxPercent,
+    mdrPercent: payment.mdrPercent,
+    taxAmount: payment.taxAmount,
+    mdrAmount: payment.mdrAmount,
     type: payment.type,
     stripeSessionId: payment.stripeSessionId,
     status: payment.status,
@@ -1211,6 +1265,10 @@ export async function updatePayment(id: string, patch: Partial<Payment>): Promis
     packageId: updated.packageId,
     tokenCount: updated.tokenCount,
     amountCents: updated.amountCents,
+    taxPercent: updated.taxPercent,
+    mdrPercent: updated.mdrPercent,
+    taxAmount: updated.taxAmount,
+    mdrAmount: updated.mdrAmount,
     type: updated.type,
     stripeSessionId: updated.stripeSessionId,
     status: updated.status,
@@ -1636,11 +1694,29 @@ export async function recoverStuckPosts(): Promise<number> {
   let recovered = 0
   for (const post of allPosts) {
     if (STUCK_STATUSES.includes(post.status as PostStage)) {
+      // Refund the publish charge if the post was charged but never published.
+      // This prevents a double charge when the user re-approves after recovery.
+      const chargedAction = post.tokensChargedAction as 'standard_post' | 'cross_platform' | undefined
+      const chargedAmount = post.tokensCharged
+      if (chargedAction && chargedAmount && chargedAmount > 0) {
+        try {
+          const { tokenEngine } = await import('./lib/TokenEngine.js')
+          const userPhone = await resolveUserPhone(post.phone)
+          await tokenEngine.refund(chargedAction, userPhone, `Refund after stuck-post recovery: ${post.id}`)
+        } catch (err) {
+          logger.warn({ postId: post.id, error: (err as Error).message }, 'failed to refund tokens during stuck-post recovery')
+        }
+      }
       const history = [
         ...(post.history ?? []),
         { stage: 'AWAITING_APPROVAL' as PostStage, at: new Date().toISOString(), note: 'recovered after restart' },
       ]
-      await updatePost(post.id, { status: 'AWAITING_APPROVAL', history })
+      await updatePost(post.id, {
+        status: 'AWAITING_APPROVAL',
+        history,
+        tokensCharged: undefined,
+        tokensChargedAction: undefined,
+      })
       await setConversation(post.phone, { kind: 'awaiting_approval', postId: post.id })
       recovered++
     }

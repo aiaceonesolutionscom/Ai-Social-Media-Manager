@@ -1,8 +1,9 @@
 import { FastifyInstance } from 'fastify'
-import { listUsers, getUser, updateUser, activateUser, deactivateUser, deleteUser, getTransactions, createUser, listPackages, getPackage, createPayment, createTokenTransaction } from '../../store.js'
+import { listUsers, getUser, updateUser, activateUser, deactivateUser, deleteUser, getTransactions, createUser, listPackages, getPackage, createPayment, createTokenTransaction, listPayments, listAuditLogs } from '../../store.js'
 import { grantTokens } from '../../lib/tokens.js'
 import { hashPassword } from '../../lib/userAuth.js'
 import { clearFeatureCache } from '../../lib/packagePermissions.js'
+import { activatePackage, endPackage, isPackageExpired } from '../../lib/packageLifecycle.js'
 import { guard } from './middleware.js'
 import { auditLogger } from '../../lib/AuditLogger.js'
 
@@ -20,6 +21,38 @@ export async function registerAdminUserRoutes(server: FastifyInstance): Promise<
       return reply.status(404).send({ error: 'User not found' })
     }
     return reply.send({ user })
+  })
+
+  server.get('/api/admin/users/:phone/detail', guard('users.view'), async (req: any, reply: any) => {
+    const { phone } = req.params as { phone: string }
+    const user = await getUser(phone)
+    if (!user) {
+      return reply.status(404).send({ error: 'User not found' })
+    }
+    const pkg = user.packageId ? await getPackage(user.packageId) : null
+    const limit = 100
+    const [transactions, payments, auditLogs] = await Promise.all([
+      getTransactions(phone, limit),
+      listPayments(phone),
+      listAuditLogs({ actor: phone, limit }),
+    ])
+    return reply.send({
+      user: {
+        ...user,
+        packageName: pkg?.name || '',
+        packageInfo: pkg
+          ? {
+              name: pkg.name,
+              slug: pkg.slug,
+              includedTokens: pkg.includedTokens,
+              billingPeriod: pkg.billingPeriod,
+            }
+          : null,
+      },
+      transactions,
+      payments,
+      auditLogs,
+    })
   })
 
   server.post('/api/admin/users', guard('users.create'), async (req: any, reply: any) => {
@@ -41,12 +74,19 @@ export async function registerAdminUserRoutes(server: FastifyInstance): Promise<
         phone,
         name,
         email,
-        packageId: packageId || '',
-        tokensRemaining: tokens || 0,
+        tokensRemaining: packageId ? 0 : tokens || 0,
         passwordHash: password ? await hashPassword(password) : undefined,
       })
+      if (packageId) {
+        await activatePackage(phone, packageId, {
+          tokens: tokens,
+          actor: req.adminEmail,
+          description: `Package assigned by admin (${req.adminEmail})`,
+        })
+      }
       auditLogger.log({ actor: req.adminEmail, actorType: 'admin', action: 'user.create', target: email, details: { name, packageId } })
-      return reply.status(201).send({ user })
+      const created = await getUser(phone)
+      return reply.status(201).send({ user: created })
     } catch (err) {
       return reply.status(400).send({ error: (err as Error).message })
     }
@@ -62,9 +102,47 @@ export async function registerAdminUserRoutes(server: FastifyInstance): Promise<
     }>
 
     try {
-      const user = await updateUser(phone, patch)
-      if (patch.packageId) clearFeatureCache(phone)
-      return reply.send({ user })
+      const existing = await getUser(phone)
+      if (!existing) {
+        return reply.status(404).send({ error: 'User not found' })
+      }
+
+      const { packageId, tokensRemaining, ...rest } = patch
+
+      let user = existing
+
+      if (packageId && packageId !== existing.packageId) {
+        const pkg = await getPackage(packageId)
+        if (!pkg) {
+          return reply.status(404).send({ error: 'Package not found' })
+        }
+        user = await activatePackage(phone, pkg.slug, {
+          tokens: typeof tokensRemaining === 'number' ? tokensRemaining : undefined,
+          actor: req.adminEmail || 'admin',
+          description: `Package changed by admin (${req.adminEmail})`,
+        })
+      }
+
+      if (Object.keys(rest).length > 0) {
+        user = await updateUser(phone, rest as any)
+      }
+      if (packageId) clearFeatureCache(phone)
+
+      if (typeof tokensRemaining === 'number' && !packageId && tokensRemaining !== existing.tokensRemaining) {
+        const delta = tokensRemaining - existing.tokensRemaining
+        await createTokenTransaction({
+          phone,
+          type: delta > 0 ? 'grant' : 'deduct',
+          amount: delta > 0 ? delta : -delta,
+          balanceAfter: tokensRemaining,
+          description: `Admin balance adjustment (${delta > 0 ? '+' : ''}${delta})`,
+          adminId: req.adminEmail || 'admin',
+        })
+        auditLogger.log({ actor: req.adminEmail, actorType: 'admin', action: 'tokens.adjust', target: phone, details: { delta } })
+      }
+
+      const updated = await getUser(phone)
+      return reply.send({ user: updated })
     } catch (err) {
       return reply.status(400).send({ error: (err as Error).message })
     }
@@ -149,13 +227,15 @@ export async function registerAdminUserRoutes(server: FastifyInstance): Promise<
     }
 
     const tokensToGrant = tokens ?? pkg.includedTokens
-    const newBalance = user.tokensRemaining + tokensToGrant
 
-    await updateUser(phone, {
-      packageId: pkg.slug,
-      tokensRemaining: newBalance,
-      tokensUsed: user.tokensUsed,
+    // Replacing an existing package resets the balance — grant fresh tokens via
+    // activatePackage which also sets the billing-period expiry.
+    await activatePackage(phone, pkg.slug, {
+      tokens: tokensToGrant,
+      actor: req.adminEmail || 'admin',
+      description: `Local payment — ${pkg.name} package`,
     })
+    const newBalance = (await getUser(phone))?.tokensRemaining ?? 0
 
     await createPayment({
       phone,
@@ -164,14 +244,6 @@ export async function registerAdminUserRoutes(server: FastifyInstance): Promise<
       amountCents: pkg.priceCents,
       type: 'one_time',
       stripeSessionId: `local_${Date.now()}`,
-    })
-
-    await createTokenTransaction({
-      phone,
-      type: 'grant',
-      amount: tokensToGrant,
-      balanceAfter: newBalance,
-      description: `Local payment — ${pkg.name} package`,
     })
 
     clearFeatureCache(phone)
@@ -184,5 +256,20 @@ export async function registerAdminUserRoutes(server: FastifyInstance): Promise<
       tokensGranted: tokensToGrant,
       newBalance,
     })
+  })
+
+  server.post('/api/admin/users/:phone/end-package', guard('users.update'), async (req: any, reply: any) => {
+    const { phone } = req.params as { phone: string }
+
+    const user = await getUser(phone)
+    if (!user) {
+      return reply.status(404).send({ error: 'User not found' })
+    }
+    if (!user.packageId || user.packageStatus !== 'active') {
+      return reply.status(400).send({ error: 'User has no active package to end' })
+    }
+
+    const updated = await endPackage(phone, { actor: req.adminEmail || 'admin', reason: 'ended by admin' })
+    return reply.send({ success: true, user: updated })
   })
 }

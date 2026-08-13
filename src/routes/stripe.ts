@@ -1,7 +1,7 @@
 import { FastifyInstance } from 'fastify'
 import { constructWebhookEvent } from '../lib/stripe.js'
-import { createUser, getPackage, createPayment, updatePayment } from '../store.js'
-import { grantTokens } from '../lib/tokens.js'
+import { createUser, getPackage, createPayment, updatePayment, getPaymentByStripeSession, updateUser } from '../store.js'
+import { activatePackage } from '../lib/packageLifecycle.js'
 import { clearFeatureCache } from '../lib/packagePermissions.js'
 import { sendWelcomeMessage } from '../lib/welcome.js'
 import { notifyNewUser, notifyPayment } from '../lib/notifications.js'
@@ -35,6 +35,13 @@ export async function registerStripeRoutes(server: FastifyInstance): Promise<voi
 
         if (!phone) {
           logger.warn('checkout.session.completed missing metadata')
+          break
+        }
+
+        // Idempotency: Stripe retries failed deliveries. Only process each session once.
+        const existingPayment = await getPaymentByStripeSession(session.id)
+        if (existingPayment && existingPayment.status === 'completed') {
+          logger.info({ stripeSessionId: session.id }, 'stripe event already processed, skipping')
           break
         }
 
@@ -95,18 +102,33 @@ export async function registerStripeRoutes(server: FastifyInstance): Promise<voi
 
           logger.info({ phone, packageId }, 'new user created via stripe webhook')
         } else {
+          // Existing user buying a package: replace their package, activate it with a
+          // fresh billing period, and grant the included tokens (replacing old balance).
+          const pkg = await getPackage(packageId)
+          const tokens = pkg?.includedTokens || 0
+          if (pkg) {
+            await activatePackage(phone, pkg.slug, {
+              tokens,
+              description: `Package purchase — ${pkg.name}`,
+            })
+          } else {
+            await updateUser(phone, { packageId: undefined })
+          }
+          clearFeatureCache(phone)
+
           const payment = await createPayment({
             phone,
-            packageId,
-            tokenCount: 0,
+            packageId: pkg?.slug || packageId,
+            tokenCount: tokens,
             amountCents: session.amount_total || 0,
             type: 'subscription',
             stripeSessionId: session.id,
           })
 
           await updatePayment(payment.id, { status: 'completed' })
+          await notifyPayment(phone, session.amount_total || 0, pkg?.name || 'Package')
 
-          logger.info({ phone }, 'existing user made a payment')
+          logger.info({ phone, packageId, tokens }, 'existing user package purchase completed via stripe webhook')
         }
         break
       }

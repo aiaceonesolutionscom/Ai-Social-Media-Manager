@@ -184,10 +184,11 @@ export async function generatePlatformContent(
   prefs?: UserPreferences,
   brand?: BrandProfile,
 ): Promise<PlatformContent> {
-  const [facebook, instagram] = await Promise.all([
-    writeContentForPlatform(intent, plan, 'facebook', prefs, brand),
-    writeContentForPlatform(intent, plan, 'instagram', prefs, brand),
-  ])
+  // Sequential (not parallel) so we fire only ONE LLM request at a time. The two
+  // writers both hit the same LLM provider (e.g. Mistral) and running them in
+  // parallel doubles the chance of tripping a per-minute rate limit (429).
+  const facebook = await writeContentForPlatform(intent, plan, 'facebook', prefs, brand)
+  const instagram = await writeContentForPlatform(intent, plan, 'instagram', prefs, brand)
   return { facebook, instagram }
 }
 

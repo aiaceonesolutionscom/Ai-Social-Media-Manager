@@ -8,6 +8,10 @@ interface User {
   email: string;
   packageId: string;
   packageName?: string;
+  packageStatus: 'none' | 'active' | 'expired' | 'ended';
+  packageStartedAt?: string;
+  packageExpiresAt?: string;
+  packageEndedAt?: string;
   tokensRemaining: number;
   tokensUsed: number;
   avatarUrl?: string;
@@ -23,6 +27,7 @@ interface UserAuthState {
   clerkLogin: (clerkToken: string) => Promise<{ success: boolean; error?: string }>;
   logout: () => Promise<void>;
   refreshUser: () => Promise<void>;
+  endPackage: () => Promise<{ success: boolean; error?: string }>;
 }
 
 const UserAuthContext = createContext<UserAuthState>({
@@ -34,6 +39,7 @@ const UserAuthContext = createContext<UserAuthState>({
   clerkLogin: async () => ({ success: false }),
   logout: async () => {},
   refreshUser: async () => {},
+  endPackage: async () => ({ success: false }),
 });
 
 export function UserAuthProvider({ children }: { children: React.ReactNode }) {
@@ -50,7 +56,7 @@ export function UserAuthProvider({ children }: { children: React.ReactNode }) {
     }
 
     try {
-      const data = await apiRequest<{ phone: string; name: string; email: string; packageId: string; packageName?: string; tokensRemaining: number; tokensUsed: number; avatarUrl?: string; oauthProvider?: string }>(endpoints.userMe, {
+      const data = await apiRequest<User>(endpoints.userMe, {
         headers: { Authorization: `Bearer ${token}` },
       });
       setUser(data);
@@ -129,8 +135,23 @@ export function UserAuthProvider({ children }: { children: React.ReactNode }) {
     }
   };
 
+  const endPackage = async (): Promise<{ success: boolean; error?: string }> => {
+    const token = getUserToken();
+    if (!token) return { success: false, error: 'Not signed in' };
+    try {
+      await apiRequest(endpoints.userEndPackage, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      await refreshUser();
+      return { success: true };
+    } catch (err) {
+      return { success: false, error: (err as Error).message };
+    }
+  };
+
   return (
-    <UserAuthContext.Provider value={{ user, isAuthenticated: !!user, loading, signup, login, clerkLogin, logout, refreshUser }}>
+    <UserAuthContext.Provider value={{ user, isAuthenticated: !!user, loading, signup, login, clerkLogin, logout, refreshUser, endPackage }}>
       {children}
     </UserAuthContext.Provider>
   );

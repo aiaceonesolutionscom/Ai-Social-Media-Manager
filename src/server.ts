@@ -8,6 +8,7 @@ import { handleWebhook, handleVerify } from './routes/webhook.js'
 import { handleUserInput, handleVoiceInput } from './pipeline/conversation.js'
 import { startPublishScheduler, schedulePost, getScheduledPosts, cancelScheduledPostById, parseScheduleTime } from './pipeline/publish.js'
 import { startAdScheduler } from './pipeline/adScheduler.js'
+import { startPackageExpiryScheduler } from './lib/PackageExpiryScheduler.js'
 import { requireFeature, FeatureNotIncludedError } from './lib/packagePermissions.js'
 import { bootstrapSuperAdmin } from './lib/adminAuth.js'
 import { saveImageBuffer } from './storage.js'
@@ -32,6 +33,7 @@ import { registerSupportRoutes } from './routes/support.js'
 import { registerHealthRoutes } from './routes/health.js'
 import { registerBillingRoutes } from './routes/billing.js'
 import { registerStripeRoutes } from './routes/stripe.js'
+import { registerGatewayRoutes } from './routes/gateway.js'
 import { registerAuthRoutes } from './routes/auth.js'
 import { registerSocialRoutes } from './routes/social.js'
 import { registerCheckoutRoutes } from './routes/checkout.js'
@@ -49,6 +51,7 @@ async function main(): Promise<void> {
   await recoverStuckPosts()
   startPublishScheduler()
   startAdScheduler()
+  startPackageExpiryScheduler()
   // ensureReady() — commented out for dev mode without real API keys
 
   if (config.admin.email === 'admin@example.com' || config.admin.password === 'admin123') {
@@ -56,6 +59,14 @@ async function main(): Promise<void> {
       '⚠️  WARNING: Using default admin credentials (admin@example.com / admin123). ' +
       'Set ADMIN_EMAIL and ADMIN_PASSWORD in .env before going to production.',
     )
+  }
+
+  if (config.stripe.secretKey && !config.stripe.webhookSecret) {
+    console.error(
+      'FATAL: STRIPE_WEBHOOK_SECRET is required when STRIPE_SECRET_KEY is set. ' +
+      'Refusing to start — customers would be charged without token credit.',
+    )
+    process.exit(1)
   }
 
   if (config.dev.enabled) {
@@ -119,8 +130,21 @@ async function main(): Promise<void> {
 
   // Public API: integration / dev-mode status (drives frontend test-mode UI)
   server.get('/api/meta', async (_req: any, reply: any) => {
+    const cfg = await getAllConfig()
+    const stripeKey = config.stripe.secretKey || cfg.stripe_secret
+    // Admin toggles control visibility in checkout; the secret key controls real capability.
+    const stripeEnabled = cfg.payment_method_stripe !== 'off'
+    const gatewayEnabled = cfg.gateway_enabled !== 'off'
+    const gatewayConfigured = !!(cfg.gateway_api_key && cfg.gateway_webhook_secret)
+    const parsePercent = (raw: string | undefined, fallback: number): number => {
+      const n = Number(raw)
+      return Number.isFinite(n) && n >= 0 ? n : fallback
+    }
+    const taxPercent = parsePercent(cfg.checkout_tax_percent, 8)
+    const mdrPercent = parsePercent(cfg.checkout_mdr_percent, 2)
+
     const integrations = {
-      stripe: !!config.stripe.secretKey,
+      stripe: !!stripeKey,
       whatsapp: !!(config.whatsapp.token && config.whatsapp.phoneNumberId),
       facebook: !!(config.oauth.facebook.clientId),
       instagram: !!(config.instagram.accessToken && config.instagram.igUserId),
@@ -129,7 +153,25 @@ async function main(): Promise<void> {
       openai: !!config.image.openaiKey,
       clerk: !!config.clerk.secretKey,
     }
-    return reply.send({ devMode: config.dev.enabled, integrations })
+    return reply.send({
+      devMode: config.dev.enabled,
+      integrations,
+      paymentMethods: {
+        stripe: stripeEnabled,
+        gateway: gatewayEnabled,
+      },
+      checkout: {
+        taxPercent,
+        mdrPercent,
+        pkrRate: Number(cfg.payment_local_pkr_rate) || 0,
+      },
+      gatewayPayment: {
+        enabled: gatewayEnabled,
+        configured: gatewayConfigured,
+        sandbox: cfg.gateway_sandbox === 'on',
+        webhookUrl: `${config.publicBaseUrl}/webhooks/gateway`,
+      },
+    })
   })
 
   // Dev-only: simulate a WhatsApp message to drive the whole conversation via curl
@@ -360,6 +402,7 @@ async function main(): Promise<void> {
   registerHealthRoutes(server)
   registerBillingRoutes(server)
   registerStripeRoutes(server)
+  registerGatewayRoutes(server)
   registerAuthRoutes(server)
   registerSocialRoutes(server)
   registerCheckoutRoutes(server)

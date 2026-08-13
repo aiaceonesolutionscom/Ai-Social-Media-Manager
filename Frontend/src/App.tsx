@@ -27,6 +27,7 @@ import { AdminReports } from './pages/admin/AdminReports';
 import { AdminPackages } from './pages/admin/AdminPackages';
 import { AdminTopUps } from './pages/admin/AdminTopUps';
 import { AdminUsers } from './pages/admin/AdminUsers';
+import { AdminUserDetail } from './pages/admin/AdminUserDetail';
 import { AdminPayments } from './pages/admin/AdminPayments';
 import { AdminSettings } from './pages/admin/AdminSettings';
 import { AdminAIProviders } from './pages/admin/AdminAIProviders';
@@ -34,6 +35,7 @@ import { AdminMetaSettings } from './pages/admin/AdminMetaSettings';
 import { AdminSupport } from './pages/admin/AdminSupport';
 import { AdminAdmins } from './pages/admin/AdminAdmins';
 import { AdminAuditLog } from './pages/admin/AdminAuditLog';
+import { AdminProfile } from './pages/admin/AdminProfile';
 import { NotFound } from './pages/NotFound';
 import { RequireAdmin } from './components/layout/RequireAdmin';
 import { RequireUser } from './components/RequireUser';
@@ -74,6 +76,7 @@ export function App() {
             <Route path="/admin/packages" element={<RequireAdmin><AdminPackages /></RequireAdmin>} />
             <Route path="/admin/topups" element={<RequireAdmin><AdminTopUps /></RequireAdmin>} />
             <Route path="/admin/users" element={<RequireAdmin><AdminUsers /></RequireAdmin>} />
+            <Route path="/admin/users/:phone" element={<RequireAdmin><AdminUserDetail /></RequireAdmin>} />
             <Route path="/admin/payments" element={<RequireAdmin><AdminPayments /></RequireAdmin>} />
             <Route path="/admin/settings" element={<RequireAdmin><AdminSettings /></RequireAdmin>} />
             <Route path="/admin/ai-providers" element={<RequireAdmin><AdminAIProviders /></RequireAdmin>} />
@@ -81,6 +84,7 @@ export function App() {
             <Route path="/admin/support" element={<RequireAdmin><AdminSupport /></RequireAdmin>} />
             <Route path="/admin/admins" element={<RequireAdmin><AdminAdmins /></RequireAdmin>} />
             <Route path="/admin/audit" element={<RequireAdmin><AdminAuditLog /></RequireAdmin>} />
+            <Route path="/admin/profile" element={<RequireAdmin><AdminProfile /></RequireAdmin>} />
             <Route path="*" element={<NotFound />} />
           </Routes>
         </UserAuthProvider>

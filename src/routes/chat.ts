@@ -3,6 +3,7 @@ import { FastifyInstance } from 'fastify'
 import { verifySession } from '../lib/userAuth.js'
 import { getAccountByPlatform, getMessages } from '../store.js'
 import { requireFeature } from '../lib/packagePermissions.js'
+import { checkUserAccess } from '../lib/auth.js'
 import { handleUserInput } from '../pipeline/conversation.js'
 import { logger } from '../lib/logger.js'
 
@@ -47,6 +48,18 @@ export async function registerChatRoutes(server: FastifyInstance): Promise<void>
       await requireFeature(phone, 'web_chat')
     } catch (err: any) {
       return reply.status(403).send({ error: err.message })
+    }
+
+    // Same access gate as WhatsApp: only active users with tokens remaining may use the assistant.
+    const access = await checkUserAccess(phone)
+    if (!access.allowed) {
+      if (access.reason === 'no_tokens') {
+        return reply.status(403).send({ error: 'No tokens remaining. Please upgrade your plan or buy more tokens.' })
+      }
+      if (access.reason === 'deactivated') {
+        return reply.status(403).send({ error: 'Your account has been deactivated. Please contact admin for assistance.' })
+      }
+      return reply.status(403).send({ error: 'You are not registered. Please contact admin to get access.' })
     }
 
     const { message } = req.body as { message?: string }

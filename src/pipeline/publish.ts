@@ -3,8 +3,9 @@ import { publishToFacebook } from '../lib/facebook.js'
 import { logger } from '../lib/logger.js'
 import { sendReplyButtons, sendText } from '../lib/whatsapp.js'
 import { fullCaption, platformCaption } from '../lib/caption.js'
-import { getPost, getUser, getPackage, resolveUserPhone, setConversation, setStage, getAccountByPlatform } from '../store.js'
+import { getPost, getUser, getPackage, resolveUserPhone, setConversation, setStage, getAccountByPlatform, updatePost } from '../store.js'
 import { getTokenCost, deductTokens } from '../lib/tokens.js'
+import { auditLogger } from '../lib/AuditLogger.js'
 import { and, eq, sql } from 'drizzle-orm'
 import { getDb } from '../db.js'
 import { scheduledPosts } from '../db/schema.js'
@@ -18,6 +19,27 @@ async function getPlatformLabel(phone: string): Promise<string> {
   if (hasIG && hasFB) return 'social media'
   if (hasIG) return 'Instagram'
   return 'Facebook'
+}
+
+// Token action charged for a post publish, based on the platforms the user's
+// package includes. Publishing to both Instagram + Facebook costs more
+// (cost_cross_platform), a single platform costs cost_standard_post.
+export async function getPublishTokenAction(userPhone: string): Promise<'standard_post' | 'cross_platform'> {
+  const user = await getUser(userPhone)
+  const pkg = user?.packageId ? await getPackage(user.packageId) : null
+  const features = (pkg?.features || {}) as Record<string, boolean>
+  const hasIG = features.instagram_publishing === true
+  const hasFB = features.facebook_publishing === true
+  // Only charge the cross-platform rate when the user is actually connected to
+  // both platforms AND their package includes both.
+  const [igAccount, fbAccount] = await Promise.all([
+    getAccountByPlatform(userPhone, 'instagram').catch(() => undefined),
+    getAccountByPlatform(userPhone, 'facebook').catch(() => undefined),
+  ])
+  const igReady = !!igAccount && hasIG
+  const fbReady = !!fbAccount && hasFB
+  if (igReady && fbReady) return 'cross_platform'
+  return 'standard_post'
 }
 
 export interface PublishJob {
@@ -43,16 +65,21 @@ export async function enqueuePublish(postId: string): Promise<void> {
 
   const userPhone = await resolveUserPhone(post.phone)
   const user = await getUser(userPhone)
+  let deductedAction: 'standard_post' | 'cross_platform' | null = null
   if (user) {
     const { tokenEngine } = await import('../lib/TokenEngine.js')
-    const estimate = await tokenEngine.estimate('standard_post', userPhone)
+    deductedAction = await getPublishTokenAction(userPhone)
+    const estimate = await tokenEngine.estimate(deductedAction, userPhone)
     if (!estimate.canAfford) {
       throw new Error('Insufficient tokens. Please upgrade your plan or buy more tokens.')
     }
-    const deduction = await tokenEngine.deduct('standard_post', userPhone, `Post publish: ${postId}`)
+    const deduction = await tokenEngine.deduct(deductedAction, userPhone, `Post publish: ${postId}`)
     if (!deduction.success) {
       throw new Error('Failed to reserve tokens. Please try again.')
     }
+    // Track the charge on the post so recovery (e.g. after a server restart)
+    // can refund it if the post is reset back to awaiting approval.
+    await updatePost(postId, { tokensCharged: estimate.cost, tokensChargedAction: deductedAction })
   }
 
   const existing = jobs.get(postId)
@@ -61,6 +88,11 @@ export async function enqueuePublish(postId: string): Promise<void> {
       throw new Error('This post is already being published and cannot be cancelled.')
     }
     if (!existing.cancelledNotified) {
+      // Same job already queued — token was deducted, refund it so the user is not charged twice.
+      if (deductedAction && user) {
+        const { tokenEngine } = await import('../lib/TokenEngine.js')
+        await tokenEngine.refund(deductedAction, userPhone, `Refund for duplicate publish request: ${postId}`)
+      }
       throw new Error('This post is already preparing to publish. Use cancel to stop it first.')
     }
     jobs.delete(postId)
@@ -186,6 +218,7 @@ async function runPublish(job: PublishJob): Promise<void> {
       publishedAt: new Date().toISOString(),
     })
     await setConversation(phone, { kind: 'idle', postId })
+    await auditLogger.log({ actor: userPhone, actorType: 'user', action: 'post.publish', target: userPhone, targetType: 'user', details: { postId, permalink: result.permalink } })
     await sendText(
       phone,
       `✅ Published!\n\nPost: ${result.permalink}\n\nDate & Time: ${new Date().toLocaleString()}\n\nSuccess! Your ${platformLabel} post is live.`,
@@ -199,7 +232,8 @@ async function runPublish(job: PublishJob): Promise<void> {
     logger.error({ postId, error: (err as Error).message }, 'publish failed')
     try {
       const { tokenEngine } = await import('../lib/TokenEngine.js')
-      await tokenEngine.refund('standard_post', userPhone, `Refund for failed publish: ${postId}`)
+      const action = await getPublishTokenAction(userPhone)
+      await tokenEngine.refund(action, userPhone, `Refund for failed publish: ${postId}`)
     } catch (refundErr) {
       logger.error({ postId, error: (refundErr as Error).message }, 'failed to refund tokens after publish failure')
     }
@@ -228,7 +262,8 @@ async function finalizeCancel(job: PublishJob): Promise<void> {
   await setConversation(phone, { kind: 'awaiting_approval', postId })
   try {
     const { tokenEngine } = await import('../lib/TokenEngine.js')
-    await tokenEngine.refund('standard_post', userPhone, `Refund for cancelled publish: ${postId}`)
+    const action = await getPublishTokenAction(userPhone)
+    await tokenEngine.refund(action, userPhone, `Refund for cancelled publish: ${postId}`)
   } catch (refundErr) {
     logger.error({ postId, error: (refundErr as Error).message }, 'failed to refund tokens after cancel')
   }
@@ -256,7 +291,8 @@ export async function cancelPublish(postId: string): Promise<'cancelled' | 'too_
   job.cancelledNotified = true
   try {
     const { tokenEngine } = await import('../lib/TokenEngine.js')
-    await tokenEngine.refund('standard_post', job.userPhone, `Refund for cancelled publish: ${postId}`)
+    const action = await getPublishTokenAction(job.userPhone)
+    await tokenEngine.refund(action, job.userPhone, `Refund for cancelled publish: ${postId}`)
   } catch (refundErr) {
     logger.error({ postId, error: (refundErr as Error).message }, 'failed to refund tokens after cancel')
   }

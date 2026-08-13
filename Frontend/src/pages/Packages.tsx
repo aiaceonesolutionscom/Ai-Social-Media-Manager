@@ -7,6 +7,8 @@ import { BuyCreditsSection } from '../components/user/BuyCreditsSection';
 import { PageTransition } from '../components/layout/PageTransition';
 import { apiRequest, endpoints } from '../utils/api';
 import { buildFeatureList } from '../utils/features';
+import { useUserAuth } from '../contexts/UserAuthContext';
+import { Button } from '../components/ui/Button';
 import type { PricingPackage } from '../types';
 
 const fallbackPackages: PricingPackage[] = [
@@ -103,6 +105,7 @@ function SectionHeading({ eyebrow, title, description }: { eyebrow?: string; tit
 
 export function Packages() {
   const navigate = useNavigate();
+  const { user, endPackage } = useUserAuth();
   const [packages, setPackages] = React.useState<PricingPackage[]>(fallbackPackages);
   const [loading, setLoading] = React.useState(true);
   const [tokenCosts, setTokenCosts] = React.useState(fallbackTokenCosts);
@@ -150,6 +153,13 @@ export function Packages() {
   const setup = packages.filter((p) => p.setupType === 'standard' || p.setupType === 'premium');
 
   const handleCheckout = (pkg: PricingPackage) => {
+    if (user?.packageStatus === 'active') {
+      window.confirm(
+        'You already have an active package. Buy a new package? Your current package will need to be ended first — remaining tokens will be forfeited.',
+      );
+      navigate('/dashboard');
+      return;
+    }
     navigate(`/checkout?plan=${pkg.id}`);
   };
 
@@ -169,6 +179,34 @@ export function Packages() {
                 plans come with 2 months free — or add a one-time setup package. You can upgrade or top up at any time.
               </p>
             </header>
+
+            {user?.packageStatus === 'active' && (
+              <section aria-labelledby="active-package-warning" className="mt-8 rounded-2xl border border-amber-300 bg-gradient-to-br from-amber-50 to-white p-5 dark:border-amber-500/40 dark:from-amber-500/10 dark:to-slate-900">
+                <div className="flex flex-col items-start justify-between gap-4 sm:flex-row sm:items-center">
+                  <div>
+                    <h2 id="active-package-warning" className="text-base font-bold text-slate-900 dark:text-slate-50">
+                      You already have an active package
+                    </h2>
+                    <p className="mt-1 text-sm text-slate-600 dark:text-slate-300">
+                      End your current package before buying a new one. Remaining tokens will be forfeited.
+                    </p>
+                  </div>
+                  <Button
+                    variant="danger"
+                    onClick={async () => {
+                      if (!window.confirm('End your current package? Remaining tokens will be forfeited.')) return;
+                      const result = await endPackage();
+                      if (result.success) {
+                        window.location.reload();
+                      } else {
+                        window.alert(result.error || 'Failed to end package');
+                      }
+                    }}>
+                    End current package
+                  </Button>
+                </div>
+              </section>
+            )}
 
             {loading ? (
               <div className="mt-12 grid gap-6 md:grid-cols-2 lg:grid-cols-4">

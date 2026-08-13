@@ -1,6 +1,6 @@
 import { FastifyInstance } from 'fastify'
 import { listAdminUsers, getAdminUser, createAdminUser, updateAdminUser, deleteAdminUser } from '../../store.js'
-import { hashAdminPassword, allPermissionKeys } from '../../lib/adminAuth.js'
+import { hashAdminPassword, allPermissionKeys, invalidateAdminSessions } from '../../lib/adminAuth.js'
 import { guard } from './middleware.js'
 import { auditLogger } from '../../lib/AuditLogger.js'
 
@@ -92,11 +92,19 @@ export async function registerAdminAdminsRoutes(server: FastifyInstance): Promis
     if (role === 'super_admin' && req.adminRole !== 'super_admin') {
       return reply.status(403).send({ error: 'Only super admins can assign this role' })
     }
+    if (isSelf && req.adminRole !== 'super_admin' && (permissions !== undefined || role !== undefined)) {
+      return reply.status(403).send({ error: 'You cannot change your own role or permissions' })
+    }
     if (isSelf && isActive === false) {
       return reply.status(400).send({ error: 'You cannot deactivate your own account' })
     }
 
     const perms = Array.isArray(permissions) ? permissions.filter(p => allPermissionKeys().includes(p)) : permissions
+
+    const changesPrivileges =
+      (permissions !== undefined && JSON.stringify(perms) !== JSON.stringify(target.permissions)) ||
+      (role !== undefined && role !== target.role) ||
+      isActive === false
 
     try {
       const admin = await updateAdminUser(id, {
@@ -106,6 +114,9 @@ export async function registerAdminAdminsRoutes(server: FastifyInstance): Promis
         passwordHash: password ? await hashAdminPassword(password) : undefined,
         isActive,
       })
+      if (changesPrivileges) {
+        await invalidateAdminSessions(target.email)
+      }
       auditLogger.log({ actor: req.adminEmail, actorType: 'admin', action: 'admins.update', target: target.email, details: { role: role || target.role } })
       return reply.send({ admin: sanitize(admin) })
     } catch (err) {
@@ -135,6 +146,7 @@ export async function registerAdminAdminsRoutes(server: FastifyInstance): Promis
 
     try {
       await deleteAdminUser(id)
+      await invalidateAdminSessions(target.email)
       auditLogger.log({ actor: req.adminEmail, actorType: 'admin', action: 'admins.delete', target: target.email })
       return reply.send({ success: true })
     } catch (err) {

@@ -79,6 +79,8 @@ export interface Post {
   createdAt: string
   updatedAt: string
   history?: StageEvent[]
+  tokensCharged?: number
+  tokensChargedAction?: string
 }
 
 export type MessageRole = 'user' | 'bot'
@@ -201,6 +203,10 @@ export interface User {
   role: 'user' | 'admin'
   active: number
   packageId: string
+  packageStatus: 'none' | 'active' | 'expired' | 'ended'
+  packageStartedAt: string
+  packageExpiresAt: string
+  packageEndedAt: string
   tokensRemaining: number
   tokensUsed: number
   stripeCustomerId: string
@@ -213,7 +219,7 @@ export interface User {
   updatedAt: string
 }
 
-export type TokenTransactionType = 'grant' | 'deduct' | 'refund' | 'bonus'
+export type TokenTransactionType = 'grant' | 'deduct' | 'refund' | 'bonus' | 'revoke'
 
 export interface TokenTransaction {
   id: string
@@ -256,6 +262,10 @@ export interface Payment {
   packageId: string
   tokenCount: number
   amountCents: number
+  taxPercent: number
+  mdrPercent: number
+  taxAmount: number
+  mdrAmount: number
   type: PaymentType
   stripeSessionId: string
   status: 'pending' | 'completed' | 'failed' | 'refunded'

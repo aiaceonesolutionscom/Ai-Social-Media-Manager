@@ -18,6 +18,8 @@ export async function registerTestUser(opts: { tokens?: number; packageId?: stri
       features: {
         facebook_publishing: true,
         instagram_publishing: true,
+        whatsapp_broadcast: true,
+        web_chat: true,
         voice_transcription: true,
         scheduled_publishing: true,
         analytics_dashboard: true,

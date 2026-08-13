@@ -21,6 +21,7 @@ const PLATFORM_FEATURE_MAP: Record<string, string> = {
   facebook: 'facebook_publishing',
   instagram: 'instagram_publishing',
   meta_ads: 'ad_campaigns',
+  whatsapp: 'whatsapp_broadcast',
 };
 
 const ALL_PLATFORMS: Platform[] = [
