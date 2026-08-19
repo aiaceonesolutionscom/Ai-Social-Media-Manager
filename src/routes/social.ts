@@ -4,7 +4,6 @@ import { verifySession } from '../lib/userAuth.js'
 import { connectAccount, getAccounts, disconnectAccount } from '../store.js'
 import { logger } from '../lib/logger.js'
 import { sendOtpTemplate, sendText } from '../lib/whatsapp.js'
-import { sendWelcomeMessage } from '../lib/welcome.js'
 import { generateOtp, storeOtp, verifyOtp, signState, verifyState } from '../lib/otp.js'
 import { requireFeature } from '../lib/packagePermissions.js'
 import { metaConfig } from '../lib/metaConfig.js'
@@ -284,9 +283,6 @@ export async function registerSocialRoutes(server: FastifyInstance): Promise<voi
       accountName: `WhatsApp (${normalizedNumber})`,
       accessToken: '',
     })
-
-    // Greet the user on their verified number so they know the bot works from it.
-    await sendWelcomeMessage(normalizedNumber)
 
     return reply.send({ success: true, message: 'WhatsApp connected' })
   })

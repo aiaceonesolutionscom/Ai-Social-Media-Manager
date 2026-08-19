@@ -1,7 +1,7 @@
 import React from 'react';
 import { useNavigate } from 'react-router-dom';
 import { format, parseISO } from 'date-fns';
-import { BotIcon, CalendarClockIcon, ImagePlusIcon, XCircleIcon } from 'lucide-react';
+import { BotIcon, CalendarClockIcon, ImagePlusIcon, XCircleIcon, RefreshCcwIcon } from 'lucide-react';
 import { DashboardLayout } from '../components/layout/DashboardLayout';
 import { Card } from '../components/ui/Card';
 import { Button } from '../components/ui/Button';
@@ -37,6 +37,14 @@ function formatDateTime(iso: string): string {
   }
 }
 
+function toLocalInput(iso: string): string {
+  try {
+    return format(parseISO(iso), "yyyy-MM-dd'T'HH:mm");
+  } catch {
+    return '';
+  }
+}
+
 export function Scheduled() {
   const navigate = useNavigate();
   const { isAuthenticated, loading: authLoading } = useUserAuth();
@@ -51,6 +59,10 @@ export function Scheduled() {
   const [imageBase64, setImageBase64] = React.useState('');
   const [imageName, setImageName] = React.useState('');
   const [submitting, setSubmitting] = React.useState(false);
+
+  const [reschedulingId, setReschedulingId] = React.useState<string | null>(null);
+  const [rescheduleTime, setRescheduleTime] = React.useState('');
+  const [rescheduling, setRescheduling] = React.useState(false);
 
   const hasSchedule = !featuresLoading && hasFeature('scheduled_publishing');
   const hasAds = !featuresLoading && hasFeature('ad_campaigns');
@@ -71,7 +83,7 @@ export function Scheduled() {
   }, [hasSchedule]);
 
   const fetchAds = React.useCallback(async () => {
-    if (!hasSchedule || !hasAds) return;
+    if (!hasAds) return;
     setLoadingAds(true);
     try {
       const data = await apiRequest<{ campaigns: ScheduledAd[] }>(endpoints.adsScheduled);
@@ -83,7 +95,7 @@ export function Scheduled() {
     } finally {
       setLoadingAds(false);
     }
-  }, [hasSchedule, hasAds]);
+  }, [hasAds]);
 
   React.useEffect(() => {
     if (authLoading) return;
@@ -155,6 +167,42 @@ export function Scheduled() {
       await fetchAds();
     } catch (err) {
       notify.error('Failed to cancel', (err as Error).message);
+    }
+  };
+
+  const startReschedule = (id: string, current?: string) => {
+    setReschedulingId(id);
+    setRescheduleTime(current ? toLocalInput(current) : '');
+  };
+
+  const submitReschedule = async (id: string, kind: 'post' | 'ad') => {
+    if (!rescheduleTime) {
+      notify.error('Time required', 'Pick the new publish time.');
+      return;
+    }
+    setRescheduling(true);
+    try {
+      if (kind === 'post') {
+        await apiRequest(endpoints.reschedulePost(id), {
+          method: 'POST',
+          body: JSON.stringify({ publishAt: new Date(rescheduleTime).toISOString() }),
+        });
+        notify.success('Rescheduled', 'Scheduled post time updated.');
+        await fetchPosts();
+      } else {
+        await apiRequest(endpoints.rescheduleAd(id), {
+          method: 'POST',
+          body: JSON.stringify({ schedule_time: new Date(rescheduleTime).toISOString() }),
+        });
+        notify.success('Rescheduled', 'Scheduled ad time updated.');
+        await fetchAds();
+      }
+      setReschedulingId(null);
+      setRescheduleTime('');
+    } catch (err) {
+      notify.error('Failed to reschedule', (err as Error).message);
+    } finally {
+      setRescheduling(false);
     }
   };
 
@@ -246,10 +294,27 @@ export function Scheduled() {
                       {item.caption || 'Untitled post'}
                     </p>
                     <p className="mt-0.5 text-xs text-slate-500">Publishes {formatDateTime(item.publishAt)}</p>
+                    {reschedulingId === item.id && (
+                      <div className="mt-3 flex flex-wrap items-center gap-2">
+                        <Input
+                          type="datetime-local"
+                          value={rescheduleTime}
+                          onChange={(e) => setRescheduleTime(e.target.value)} />
+                        <Button size="sm" onClick={() => submitReschedule(item.id, 'post')} loading={rescheduling}>
+                          Save
+                        </Button>
+                        <Button variant="ghost" size="sm" onClick={() => setReschedulingId(null)}>Cancel</Button>
+                      </div>
+                    )}
                   </div>
-                  <Button variant="secondary" size="sm" onClick={() => cancelPost(item)}>
-                    <XCircleIcon className="h-3.5 w-3.5" aria-hidden="true" /> Cancel
-                  </Button>
+                  <div className="flex shrink-0 items-center gap-2">
+                    <Button variant="secondary" size="sm" onClick={() => startReschedule(item.id, item.publishAt)}>
+                      <RefreshCcwIcon className="h-3.5 w-3.5" aria-hidden="true" /> Reschedule
+                    </Button>
+                    <Button variant="secondary" size="sm" onClick={() => cancelPost(item)}>
+                      <XCircleIcon className="h-3.5 w-3.5" aria-hidden="true" /> Cancel
+                    </Button>
+                  </div>
                 </div>
               ))
             )}
@@ -279,10 +344,27 @@ export function Scheduled() {
                         ? `Launches ${formatDateTime(item.publishAt)}`
                         : item.status}
                     </p>
+                    {reschedulingId === item.id && (
+                      <div className="mt-3 flex flex-wrap items-center gap-2">
+                        <Input
+                          type="datetime-local"
+                          value={rescheduleTime}
+                          onChange={(e) => setRescheduleTime(e.target.value)} />
+                        <Button size="sm" onClick={() => submitReschedule(item.id, 'ad')} loading={rescheduling}>
+                          Save
+                        </Button>
+                        <Button variant="ghost" size="sm" onClick={() => setReschedulingId(null)}>Cancel</Button>
+                      </div>
+                    )}
                   </div>
-                  <Button variant="secondary" size="sm" onClick={() => cancelAd(item)}>
-                    <XCircleIcon className="h-3.5 w-3.5" aria-hidden="true" /> Cancel
-                  </Button>
+                  <div className="flex shrink-0 items-center gap-2">
+                    <Button variant="secondary" size="sm" onClick={() => startReschedule(item.id, item.publishAt)}>
+                      <RefreshCcwIcon className="h-3.5 w-3.5" aria-hidden="true" /> Reschedule
+                    </Button>
+                    <Button variant="secondary" size="sm" onClick={() => cancelAd(item)}>
+                      <XCircleIcon className="h-3.5 w-3.5" aria-hidden="true" /> Cancel
+                    </Button>
+                  </div>
                 </div>
               ))
             )}

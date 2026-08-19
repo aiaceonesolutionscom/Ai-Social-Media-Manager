@@ -1,4 +1,4 @@
-import React from 'react';
+
 import { BrowserRouter, Navigate, Route, Routes } from 'react-router-dom';
 import { AuthProvider } from './contexts/AuthContext';
 import { UserAuthProvider } from './contexts/UserAuthContext';
@@ -35,6 +35,7 @@ import { AdminMetaSettings } from './pages/admin/AdminMetaSettings';
 import { AdminSupport } from './pages/admin/AdminSupport';
 import { AdminAdmins } from './pages/admin/AdminAdmins';
 import { AdminAuditLog } from './pages/admin/AdminAuditLog';
+import { AdminErrors } from './pages/admin/AdminErrors';
 import { AdminProfile } from './pages/admin/AdminProfile';
 import { NotFound } from './pages/NotFound';
 import { RequireAdmin } from './components/layout/RequireAdmin';
@@ -84,6 +85,7 @@ export function App() {
             <Route path="/admin/support" element={<RequireAdmin><AdminSupport /></RequireAdmin>} />
             <Route path="/admin/admins" element={<RequireAdmin><AdminAdmins /></RequireAdmin>} />
             <Route path="/admin/audit" element={<RequireAdmin><AdminAuditLog /></RequireAdmin>} />
+            <Route path="/admin/errors" element={<RequireAdmin><AdminErrors /></RequireAdmin>} />
             <Route path="/admin/profile" element={<RequireAdmin><AdminProfile /></RequireAdmin>} />
             <Route path="*" element={<NotFound />} />
           </Routes>

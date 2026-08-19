@@ -5,6 +5,7 @@ import { DashboardLayout } from '../components/layout/DashboardLayout';
 import { Card } from '../components/ui/Card';
 import { Button } from '../components/ui/Button';
 import { RequireFeature } from '../components/RequireFeature';
+import { MarkdownLite } from '../components/MarkdownLite';
 import { notify } from '../components/ui/Toast';
 import { apiRequest, endpoints, API_URL } from '../utils/api';
 import { useUserAuth } from '../contexts/UserAuthContext';
@@ -17,6 +18,13 @@ interface ChatMessage {
   content: string;
   createdAt: string;
 }
+
+const SUGGESTIONS = [
+  'Create a post about my summer sale',
+  'Write a post for Ramadan offer',
+  'Show my status',
+  'Schedule a post for tomorrow 5pm',
+];
 
 function parseImageContent(content: string): { src?: string; caption: string } {
   const m = content.match(/^\[image ([^\]]+)\]\s*(.*)$/s);
@@ -33,6 +41,14 @@ function messageTime(iso: string): string {
   return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
 }
 
+function hasPendingUserMessage(messages: ChatMessage[]): boolean {
+  let lastBotTime = '';
+  for (const m of messages) {
+    if (m.role === 'bot' && m.createdAt > lastBotTime) lastBotTime = m.createdAt;
+  }
+  return messages.some((m) => m.role === 'user' && m.createdAt > lastBotTime);
+}
+
 export function Chat() {
   const navigate = useNavigate();
   const { user, isAuthenticated, loading: authLoading } = useUserAuth();
@@ -41,6 +57,8 @@ export function Chat() {
   const [sending, setSending] = React.useState(false);
   const [loading, setLoading] = React.useState(true);
   const scrollRef = React.useRef<HTMLDivElement>(null);
+  const inputRef = React.useRef<HTMLTextAreaElement>(null);
+  const pollRef = React.useRef<number | null>(null);
 
   const loadMessages = React.useCallback(async () => {
     try {
@@ -60,8 +78,19 @@ export function Chat() {
       return;
     }
     loadMessages();
-    const interval = setInterval(loadMessages, 3000);
-    return () => clearInterval(interval);
+
+    const tick = () => {
+      if (!document.hidden) loadMessages();
+    };
+    pollRef.current = window.setInterval(tick, 3000);
+    const onVisible = () => {
+      if (!document.hidden) loadMessages();
+    };
+    document.addEventListener('visibilitychange', onVisible);
+    return () => {
+      if (pollRef.current) window.clearInterval(pollRef.current);
+      document.removeEventListener('visibilitychange', onVisible);
+    };
   }, [isAuthenticated, authLoading, navigate, loadMessages]);
 
   React.useEffect(() => {
@@ -70,8 +99,8 @@ export function Chat() {
     }
   }, [messages, sending]);
 
-  const send = async () => {
-    const text = input.trim();
+  const send = async (textOverride?: string) => {
+    const text = (textOverride ?? input).trim();
     if (!text || sending) return;
     setInput('');
     setSending(true);
@@ -85,7 +114,7 @@ export function Chat() {
     }
   };
 
-  const awaitingReply = sending || (messages.length > 0 && messages[messages.length - 1].role === 'user');
+  const awaitingReply = sending || hasPendingUserMessage(messages);
 
   return (
     <DashboardLayout>
@@ -112,13 +141,24 @@ export function Chat() {
                 <p className="mt-2 max-w-sm text-sm text-slate-500">
                   Tell me what you want to post about — I&apos;ll turn it into a ready-to-publish social media post.
                 </p>
+                <div className="mt-5 flex max-w-md flex-wrap items-center justify-center gap-2">
+                  {SUGGESTIONS.map((s) => (
+                    <button
+                      key={s}
+                      onClick={() => send(s)}
+                      className="rounded-full border border-indigo-200 bg-white px-3 py-1.5 text-xs text-indigo-700 transition-colors hover:bg-indigo-50 dark:border-indigo-800 dark:bg-slate-900 dark:text-indigo-300 dark:hover:bg-indigo-950"
+                    >
+                      {s}
+                    </button>
+                  ))}
+                </div>
               </div>
             ) : (
               messages.map((m) => (
                 <div key={m.id} className={cn('flex', m.role === 'user' ? 'justify-end' : 'justify-start')}>
                   <div
                     className={cn(
-                      'max-w-[80%] rounded-2xl px-4 py-2.5 text-sm shadow-sm whitespace-pre-wrap',
+                      'max-w-[80%] rounded-2xl px-4 py-2.5 text-sm shadow-sm',
                       m.role === 'user'
                         ? 'rounded-br-md bg-indigo-600 text-white'
                         : 'rounded-bl-md bg-slate-100 text-slate-800 dark:bg-slate-800 dark:text-slate-100',
@@ -134,8 +174,10 @@ export function Chat() {
                       ) : (
                         <span className="italic opacity-80">🖼️ {m.content}</span>
                       );
-                    })() : (
-                      m.content
+                    })() : m.role === 'bot' ? (
+                      <MarkdownLite text={m.content} />
+                    ) : (
+                      <span className="whitespace-pre-wrap">{m.content}</span>
                     )}
                     <div
                       className={cn(
@@ -152,32 +194,40 @@ export function Chat() {
 
             {awaitingReply && (
               <div className="flex justify-start">
-                <div className="rounded-2xl rounded-bl-md bg-slate-100 px-4 py-3 shadow-sm dark:bg-slate-800">
+                <div className="flex items-center gap-2 rounded-2xl rounded-bl-md bg-slate-100 px-4 py-3 shadow-sm dark:bg-slate-800">
                   <span className="inline-flex gap-1">
-                    <span className="h-2 w-2 animate-bounce rounded-full bg-slate-400" />
-                    <span className="h-2 w-2 animate-bounce rounded-full bg-slate-400 [animation-delay:150ms]" />
-                    <span className="h-2 w-2 animate-bounce rounded-full bg-slate-400 [animation-delay:300ms]" />
+                    <span className="h-2 w-2 animate-bounce rounded-full bg-indigo-400" />
+                    <span className="h-2 w-2 animate-bounce rounded-full bg-indigo-400 [animation-delay:150ms]" />
+                    <span className="h-2 w-2 animate-bounce rounded-full bg-indigo-400 [animation-delay:300ms]" />
                   </span>
+                  <span className="text-xs text-slate-400">thinking…</span>
                 </div>
               </div>
             )}
           </div>
 
-          <div className="flex items-center gap-3 border-t border-slate-100 p-4 dark:border-slate-800">
-            <input
+          <div className="flex items-end gap-3 border-t border-slate-100 p-4 dark:border-slate-800">
+            <textarea
+              ref={inputRef}
               value={input}
-              onChange={(e) => setInput(e.target.value)}
+              rows={1}
+              onChange={(e) => {
+                setInput(e.target.value);
+                e.target.style.height = 'auto';
+                e.target.style.height = `${Math.min(e.target.scrollHeight, 120)}px`;
+              }}
               onKeyDown={(e) => {
                 if (e.key === 'Enter' && !e.shiftKey) {
                   e.preventDefault();
                   send();
+                  if (inputRef.current) inputRef.current.style.height = 'auto';
                 }
               }}
               placeholder="Type a message…"
               aria-label="Message"
-              className="flex-1 h-11 rounded-xl border border-slate-200 bg-white px-3.5 text-sm text-slate-900 placeholder:text-slate-400 transition-colors focus:border-indigo-500 focus:ring-2 focus:ring-indigo-100 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100"
+              className="max-h-[120px] flex-1 resize-none rounded-xl border border-slate-200 bg-white px-3.5 py-2.5 text-sm text-slate-900 placeholder:text-slate-400 transition-colors focus:border-indigo-500 focus:ring-2 focus:ring-indigo-100 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100"
             />
-            <Button onClick={send} disabled={sending || input.trim().length === 0} loading={sending}>
+            <Button onClick={() => send()} disabled={sending || input.trim().length === 0} loading={sending} className="h-11">
               <SendIcon className="h-4 w-4" />
             </Button>
           </div>

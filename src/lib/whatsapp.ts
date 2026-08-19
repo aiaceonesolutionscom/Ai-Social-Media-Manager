@@ -38,7 +38,7 @@ function mockResult(label: string): Record<string, unknown> {
 // Web-only users have canonical synthetic phone keys (u_...). The bot conversation is
 // still logged to the messages table so the website dashboard chat can show it, but there
 // is no real WhatsApp number to deliver to — skip the WhatsApp API call entirely.
-function isWebOnlyPhone(to: string): boolean {
+export function isWebOnlyPhone(to: string): boolean {
   return to.startsWith('u_')
 }
 

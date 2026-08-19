@@ -5,10 +5,10 @@ interface ChatMessage {
   content: string
 }
 
-export async function chat(messages: ChatMessage[], opts: { json?: boolean; temperature?: number } = {}): Promise<string> {
+export async function chat(messages: ChatMessage[], opts: { json?: boolean; temperature?: number; phone?: string } = {}): Promise<string> {
   return providerManager.chat(messages, opts)
 }
 
-export async function chatJson<T>(messages: ChatMessage[], opts: { temperature?: number } = {}): Promise<T> {
+export async function chatJson<T>(messages: ChatMessage[], opts: { temperature?: number; phone?: string } = {}): Promise<T> {
   return providerManager.chatJson<T>(messages, opts)
 }

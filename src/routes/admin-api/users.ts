@@ -1,5 +1,5 @@
 import { FastifyInstance } from 'fastify'
-import { listUsers, getUser, updateUser, activateUser, deactivateUser, deleteUser, getTransactions, createUser, listPackages, getPackage, createPayment, createTokenTransaction, listPayments, listAuditLogs } from '../../store.js'
+import { listUsers, getUser, updateUser, activateUser, deactivateUser, deleteUser, getTransactions, createUser, listPackages, getPackage, createPayment, createTokenTransaction, listPayments, listAuditLogs, getUserPreferences, saveUserPreferences } from '../../store.js'
 import { grantTokens } from '../../lib/tokens.js'
 import { hashPassword } from '../../lib/userAuth.js'
 import { clearFeatureCache } from '../../lib/packagePermissions.js'
@@ -48,6 +48,7 @@ export async function registerAdminUserRoutes(server: FastifyInstance): Promise<
               billingPeriod: pkg.billingPeriod,
             }
           : null,
+        packageFeatures: (pkg?.features ?? {}) as Record<string, boolean>,
       },
       transactions,
       payments,
@@ -271,5 +272,32 @@ export async function registerAdminUserRoutes(server: FastifyInstance): Promise<
 
     const updated = await endPackage(phone, { actor: req.adminEmail || 'admin', reason: 'ended by admin' })
     return reply.send({ success: true, user: updated })
+  })
+
+  // Get user branding settings (admin override)
+  server.get('/api/admin/users/:phone/branding', guard('users.view'), async (req: any, reply: any) => {
+    const { phone } = req.params as { phone: string }
+    const user = await getUser(phone)
+    if (!user) {
+      return reply.status(404).send({ error: 'User not found' })
+    }
+    const prefs = await getUserPreferences(phone)
+    return reply.send({ brandingEnabled: prefs?.brandingEnabled ?? true })
+  })
+
+  // Update user branding settings (admin override)
+  server.put('/api/admin/users/:phone/branding', guard('users.update'), async (req: any, reply: any) => {
+    const { phone } = req.params as { phone: string }
+    const user = await getUser(phone)
+    if (!user) {
+      return reply.status(404).send({ error: 'User not found' })
+    }
+    const { brandingEnabled } = (req.body ?? {}) as { brandingEnabled?: boolean }
+    if (typeof brandingEnabled !== 'boolean') {
+      return reply.status(400).send({ error: 'brandingEnabled must be a boolean' })
+    }
+    const prefs = await getUserPreferences(phone)
+    await saveUserPreferences(phone, { ...(prefs ?? {}), brandingEnabled })
+    return reply.send({ success: true, brandingEnabled })
   })
 }

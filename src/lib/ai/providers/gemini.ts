@@ -14,7 +14,7 @@ export const geminiImage: ImageProviderAdapter = {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        contents: [{ parts: [{ text: `Create a square 1080x1080 social media image. Do NOT put any text in the image. ${prompt}` }] }],
+        contents: [{ parts: [{ text: `Do NOT put any text in the image. ${prompt}` }] }],
         generationConfig: { responseModalities: ['IMAGE'] },
       }),
     })

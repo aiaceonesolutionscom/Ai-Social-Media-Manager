@@ -3,7 +3,6 @@ import { useNavigate } from 'react-router-dom';
 import { CoinsIcon, DollarSignIcon, FileTextIcon, UsersIcon } from 'lucide-react';
 import { AdminLayout } from '../../components/layout/AdminLayout';
 import { AdminHeader } from '../../components/admin/AdminHeader';
-import { ActivityFeed } from '../../components/admin/ActivityFeed';
 import { StatsCard } from '../../components/ui/StatsCard';
 import { Card, CardHeader } from '../../components/ui/Card';
 import { UsageChart } from '../../components/user/UsageChart';
@@ -34,10 +33,6 @@ const fallbackStats: Stats = {
 };
 
 const fallbackChart: ChartPoint[] = [];
-
-const fallbackActivity = [
-  { id: '1', type: 'user', message: 'System initialized', time: 'Just now' },
-];
 
 export function AdminDashboard() {
   const navigate = useNavigate();

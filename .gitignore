@@ -8,3 +8,13 @@ data/
 stderr.txt
 stdout.txt
 check_db.*
+
+# Local scratch / exploration artifacts
+test-output.txt
+live-llm-report.json
+check-llm.cjs
+check-state.cjs
+prov-check.ts
+e2e-webchat-driver.mjs
+webchat-channel-driver.ts
+webchat-greeting-driver.ts

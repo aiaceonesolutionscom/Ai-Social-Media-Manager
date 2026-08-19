@@ -101,3 +101,11 @@ export function normalizeUrl(text: string): string {
   }
   return `https://${trimmed}`
 }
+
+export function isValidImageUrl(url: string): boolean {
+  if (!url) return false
+  if (!/^https?:\/\//i.test(url)) return false
+  if (url.includes('localhost') || url.includes('127.0.0.1')) return false
+  if (url.includes('example.com')) return false
+  return true
+}

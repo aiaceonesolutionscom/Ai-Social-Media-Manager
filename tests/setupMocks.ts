@@ -48,4 +48,5 @@ vi.mock('../src/storage.js', () => ({
   postImageUrl: vi.fn().mockReturnValue('http://mock/media/test.png'),
   readFile: vi.fn(),
   fileExists: vi.fn().mockReturnValue(true),
+  storageDir: vi.fn().mockReturnValue('storage'),
 }))

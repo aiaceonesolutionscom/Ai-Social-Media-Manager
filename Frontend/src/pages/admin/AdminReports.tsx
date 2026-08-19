@@ -7,6 +7,7 @@ import {
   CpuIcon,
   DownloadIcon,
   FileTextIcon,
+  LandmarkIcon,
   LifeBuoyIcon,
   MegaphoneIcon,
   PackageIcon,
@@ -39,9 +40,28 @@ interface ReportData {
   aiUsage: any[];
   supportTickets: any[];
   summary: any;
+  billingSummary?: {
+    totalRevenue: number;
+    totalAICost: number;
+    totalFees: number;
+    totalTax: number;
+    totalMdr: number;
+    netProfit: number;
+    profitMargin: number;
+    monthlyRevenue: number;
+    monthlyAICost: number;
+    monthlyFees: number;
+    monthlyTax: number;
+    monthlyMdr: number;
+    monthlyProfit: number;
+    perPackage: Array<{ packageId: string; packageName: string; userCount: number; revenue: number; aiCost: number; fees: number; profit: number; profitMargin: number }>;
+    perUser: Array<{ phone: string; packageName: string; aiCost: number; creditsUsed: number; revenue: number }>;
+    byProvider: Array<{ providerId: string; providerName: string; category: string; requests: number; unpricedRequests: number; aiCostCents: number }>;
+    daily: Array<{ date: string; revenue: number; aiCost: number; fees: number; profit: number }>;
+  };
 }
 
-type TabId = 'users' | 'payments' | 'packages' | 'posts' | 'tokens' | 'ai' | 'ads' | 'support';
+type TabId = 'users' | 'payments' | 'packages' | 'posts' | 'tokens' | 'ai' | 'ads' | 'support' | 'billing';
 
 const TABS: Array<{ id: TabId; label: string; icon: React.ComponentType<{ className?: string }> }> = [
   { id: 'users', label: 'Users', icon: UsersIcon },
@@ -52,6 +72,7 @@ const TABS: Array<{ id: TabId; label: string; icon: React.ComponentType<{ classN
   { id: 'ai', label: 'AI Usage', icon: CpuIcon },
   { id: 'ads', label: 'Ads', icon: MegaphoneIcon },
   { id: 'support', label: 'Support', icon: LifeBuoyIcon },
+  { id: 'billing', label: 'Billing', icon: BarChart3Icon },
 ];
 
 const DATE_PRESETS = [
@@ -102,8 +123,11 @@ export function AdminReports() {
   React.useEffect(() => {
     async function fetchData() {
       try {
-        const res = await apiRequest<ReportData>(endpoints.adminReports);
-        setData(res);
+        const [reportData, billingData] = await Promise.all([
+          apiRequest<ReportData>(endpoints.adminReports),
+          apiRequest<any>(endpoints.adminBillingSummary).catch(() => null),
+        ]);
+        setData({ ...reportData, billingSummary: billingData || undefined });
       } catch (err) {
         if (err instanceof ApiError && err.status === 401) {
           setAuthToken(null);
@@ -412,6 +436,15 @@ export function AdminReports() {
       ],
       rows: supportTab,
     },
+    billing: {
+      columns: [
+        { key: 'date', header: 'Date', render: (d: any) => <span className="whitespace-nowrap">{d.date}</span> },
+        { key: 'revenue', header: 'Revenue', render: (d: any) => <span className="font-mono text-emerald-600 dark:text-emerald-300">{fmtCents(d.revenue)}</span> },
+        { key: 'aiCost', header: 'AI Cost', render: (d: any) => <span className="font-mono text-amber-600 dark:text-amber-300">{fmtCents(d.aiCost)}</span> },
+        { key: 'profit', header: 'Profit', render: (d: any) => <span className={cn('font-mono font-bold', d.profit >= 0 ? 'text-emerald-600 dark:text-emerald-300' : 'text-red-600 dark:text-red-300')}>{fmtCents(d.profit)}</span> },
+      ],
+      rows: data?.billingSummary?.daily || [],
+    },
   };
 
   const exportPdf = () => {
@@ -493,6 +526,33 @@ export function AdminReports() {
         <StatsCard label="AI spend" value={fmtCents(aiTab.reduce((s: number, l: any) => s + (l.estimatedCostCents || 0), 0))} icon={CpuIcon} tone="indigo" index={5} />
       </div>
 
+      {data?.billingSummary && (
+        <div className="mt-6 grid gap-6 sm:grid-cols-2 xl:grid-cols-4">
+          <StatsCard label="Total Revenue (all time)" value={fmtCents(data.billingSummary.totalRevenue)} icon={CreditCardIcon} tone="emerald" index={0} />
+          <StatsCard label="Total AI Cost (all time)" value={fmtCents(data.billingSummary.totalAICost)} icon={CpuIcon} tone="amber" index={1} />
+          <StatsCard label="Total Fees (processing + tax)" value={fmtCents(data.billingSummary.totalFees)} icon={CreditCardIcon} tone="slate" index={2} />
+          <StatsCard label="Net Profit" value={fmtCents(data.billingSummary.netProfit)} icon={BarChart3Icon} tone={data.billingSummary.netProfit >= 0 ? 'emerald' : 'amber'} index={3} />
+        </div>
+      )}
+
+      {data?.billingSummary && (
+        <div className="mt-6 grid gap-6 sm:grid-cols-2 xl:grid-cols-4">
+          <StatsCard label="Total Taxes" value={fmtCents(data.billingSummary.totalTax)} icon={LandmarkIcon} tone="slate" index={0} />
+          <StatsCard label="Total MDR (processing)" value={fmtCents(data.billingSummary.totalMdr)} icon={CreditCardIcon} tone="slate" index={1} />
+          <StatsCard label="Monthly Taxes" value={fmtCents(data.billingSummary.monthlyTax)} icon={LandmarkIcon} tone="slate" index={2} />
+          <StatsCard label="Monthly MDR (processing)" value={fmtCents(data.billingSummary.monthlyMdr)} icon={CreditCardIcon} tone="slate" index={3} />
+        </div>
+      )}
+
+      {data?.billingSummary && (
+        <div className="mt-6 grid gap-6 sm:grid-cols-2 xl:grid-cols-4">
+          <StatsCard label="Monthly Revenue" value={fmtCents(data.billingSummary.monthlyRevenue)} icon={CreditCardIcon} tone="emerald" index={0} />
+          <StatsCard label="Monthly AI Cost" value={fmtCents(data.billingSummary.monthlyAICost)} icon={CpuIcon} tone="amber" index={1} />
+          <StatsCard label="Monthly Fees" value={fmtCents(data.billingSummary.monthlyFees)} icon={CreditCardIcon} tone="slate" index={2} />
+          <StatsCard label="Monthly Profit" value={fmtCents(data.billingSummary.monthlyProfit)} icon={BarChart3Icon} tone={data.billingSummary.monthlyProfit >= 0 ? 'emerald' : 'amber'} index={3} />
+        </div>
+      )}
+
       <div className="mt-6 grid gap-6 lg:grid-cols-2">
         <Card as="section" hoverable={false}>
           <CardHeader title="Signups per day" description="Last 14 days (respects filters)" />
@@ -528,6 +588,123 @@ export function AdminReports() {
           </div>
         </Card>
       </div>
+
+      {data?.billingSummary && data.billingSummary.daily.length > 0 && (
+        <div className="mt-6 grid gap-6 lg:grid-cols-2">
+          <Card as="section" hoverable={false}>
+            <CardHeader title="Daily Revenue vs AI Cost" description="Last 30 days" />
+            <div className="h-56">
+              <ResponsiveContainer width="100%" height="100%">
+                <BarChart data={data.billingSummary.daily}>
+                  <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
+                  <XAxis dataKey="date" tick={{ fontSize: 8 }} />
+                  <YAxis tick={{ fontSize: 10 }} />
+                  <Tooltip formatter={(v: any) => fmtCents(v)} />
+                  <Legend />
+                  <Bar dataKey="revenue" name="Revenue" fill="#10b981" radius={[4, 4, 0, 0]} />
+                  <Bar dataKey="aiCost" name="AI Cost" fill="#f59e0b" radius={[4, 4, 0, 0]} />
+                </BarChart>
+              </ResponsiveContainer>
+            </div>
+          </Card>
+          <Card as="section" hoverable={false}>
+            <CardHeader title="Package Profitability" description="Revenue, cost and profit per package" />
+            <div className="overflow-x-auto">
+              <table className="min-w-full text-sm">
+                <thead>
+                  <tr className="border-b border-slate-200 dark:border-slate-700">
+                    <th className="px-3 py-2 text-left font-medium text-slate-500">Package</th>
+                    <th className="px-3 py-2 text-right font-medium text-slate-500">Users</th>
+                    <th className="px-3 py-2 text-right font-medium text-slate-500">Revenue</th>
+                    <th className="px-3 py-2 text-right font-medium text-slate-500">AI Cost</th>
+                    <th className="px-3 py-2 text-right font-medium text-slate-500">Profit</th>
+                    <th className="px-3 py-2 text-right font-medium text-slate-500">Margin</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {data.billingSummary.perPackage.map((pkg) => (
+                    <tr key={pkg.packageId} className="border-b border-slate-100 dark:border-slate-800">
+                      <td className="px-3 py-2 font-medium text-slate-900 dark:text-slate-100">{pkg.packageName}</td>
+                      <td className="px-3 py-2 text-right font-mono">{pkg.userCount}</td>
+                      <td className="px-3 py-2 text-right font-mono text-emerald-600">{fmtCents(pkg.revenue)}</td>
+                      <td className="px-3 py-2 text-right font-mono text-amber-600">{fmtCents(pkg.aiCost)}</td>
+                      <td className={cn('px-3 py-2 text-right font-mono font-bold', pkg.profit >= 0 ? 'text-emerald-600' : 'text-red-600')}>{fmtCents(pkg.profit)}</td>
+                      <td className="px-3 py-2 text-right">
+                        <Badge tone={pkg.profitMargin >= 30 ? 'emerald' : pkg.profitMargin > 0 ? 'amber' : 'red'}>
+                          {pkg.profitMargin.toFixed(0)}%
+                        </Badge>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </Card>
+        </div>
+      )}
+
+      {data?.billingSummary && data.billingSummary.perUser.length > 0 && (
+        <Card as="section" hoverable={false} className="mt-6">
+          <CardHeader title="Highest-Cost Users" description="Top users by AI API cost" />
+          <div className="overflow-x-auto">
+            <table className="min-w-full text-sm">
+              <thead>
+                <tr className="border-b border-slate-200 dark:border-slate-700">
+                  <th className="px-3 py-2 text-left font-medium text-slate-500">User</th>
+                  <th className="px-3 py-2 text-left font-medium text-slate-500">Package</th>
+                  <th className="px-3 py-2 text-right font-medium text-slate-500">AI Cost</th>
+                  <th className="px-3 py-2 text-right font-medium text-slate-500">Credits Used</th>
+                  <th className="px-3 py-2 text-right font-medium text-slate-500">Revenue</th>
+                </tr>
+              </thead>
+              <tbody>
+                {data.billingSummary.perUser.map((u) => (
+                  <tr key={u.phone} className="border-b border-slate-100 dark:border-slate-800">
+                    <td className="px-3 py-2 font-medium text-slate-900 dark:text-slate-100">{u.phone}</td>
+                    <td className="px-3 py-2"><Badge tone="slate">{u.packageName}</Badge></td>
+                    <td className="px-3 py-2 text-right font-mono text-amber-600">{fmtCents(u.aiCost)}</td>
+                    <td className="px-3 py-2 text-right font-mono">{u.creditsUsed}</td>
+                    <td className="px-3 py-2 text-right font-mono text-emerald-600">{fmtCents(u.revenue)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </Card>
+      )}
+
+      {data?.billingSummary && data.billingSummary.byProvider.length > 0 && (
+        <Card as="section" hoverable={false} className="mt-6">
+          <CardHeader title="AI Cost by Provider" description="Provider-wise API spend" />
+          <div className="overflow-x-auto">
+            <table className="min-w-full text-sm">
+              <thead>
+                <tr className="border-b border-slate-200 dark:border-slate-700">
+                  <th className="px-3 py-2 text-left font-medium text-slate-500">Provider</th>
+                  <th className="px-3 py-2 text-left font-medium text-slate-500">Category</th>
+                  <th className="px-3 py-2 text-right font-medium text-slate-500">Requests</th>
+                  <th className="px-3 py-2 text-right font-medium text-slate-500">Cost</th>
+                </tr>
+              </thead>
+              <tbody>
+                {data.billingSummary.byProvider.map((p) => (
+                  <tr key={`${p.providerId}-${p.category}`} className="border-b border-slate-100 dark:border-slate-800">
+                    <td className="px-3 py-2 font-medium text-slate-900 dark:text-slate-100">{p.providerName}</td>
+                    <td className="px-3 py-2"><Badge tone="slate">{p.category}</Badge></td>
+                    <td className="px-3 py-2 text-right font-mono">
+                      {p.requests.toLocaleString()}
+                      {p.unpricedRequests > 0 && (
+                        <span className="ml-1 text-amber-600" title={`${p.unpricedRequests} request(s) had no pricing configured`}>• {p.unpricedRequests} unpriced</span>
+                      )}
+                    </td>
+                    <td className="px-3 py-2 text-right font-mono text-amber-600">{fmtCents(p.aiCostCents)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </Card>
+      )}
 
       <Card as="section" hoverable={false} className="mt-6">
         <CardHeader

@@ -48,8 +48,8 @@ interface UsageStats {
   totalTokensInput: number;
   totalTokensOutput: number;
   totalCostCents: number;
-  byCategory: Record<string, { requests: number; costCents: number }>;
-  byProvider: Record<string, { requests: number; costCents: number }>;
+  byCategory: Record<string, { requests: number; costCents: number; tokensInput: number; tokensOutput: number }>;
+  byProvider: Record<string, { requests: number; costCents: number; tokensInput: number; tokensOutput: number }>;
 }
 
 interface UsageLog {
@@ -66,6 +66,22 @@ interface UsageLog {
   success: boolean;
   error: string;
   createdAt: string;
+}
+
+interface AICostVersion {
+  id: string;
+  version: number;
+  inputRate: number;
+  outputRate: number;
+  cachedInputRate: number;
+  imageRate: number;
+  audioRate: number;
+  effectiveFrom: string;
+  effectiveUntil: string | null;
+  source: string;
+  lastVerifiedAt: string | null;
+  status: string;
+  active: boolean;
 }
 
 const CATEGORY_ICONS: Record<string, React.FC<{ className?: string }>> = {
@@ -108,10 +124,27 @@ export function AdminAIProviders() {
   const [history, setHistory] = React.useState<UsageLog[]>([]);
   const [testingId, setTestingId] = React.useState<string | null>(null);
   const [testResults, setTestResults] = React.useState<Record<string, { ok: boolean; message: string }>>({});
+  const [validationStatus, setValidationStatus] = React.useState<Record<string, 'untested' | 'valid' | 'invalid'>>({});
   const [showAddForm, setShowAddForm] = React.useState<string | null>(null);
   const [newProvider, setNewProvider] = React.useState({ provider: '', displayName: '', apiKey: '', baseUrl: '', model: '' });
   const [editingCost, setEditingCost] = React.useState<string | null>(null);
   const [costForm, setCostForm] = React.useState<Partial<AICost>>({});
+  const [versionsFor, setVersionsFor] = React.useState<{ provider: string; category: string } | null>(null);
+  const [costVersions, setCostVersions] = React.useState<AICostVersion[]>([]);
+  const [versionsLoading, setVersionsLoading] = React.useState(false);
+
+  const loadCostVersions = async (provider: string, category: string) => {
+    setVersionsLoading(true);
+    setVersionsFor({ provider, category });
+    try {
+      const res = await apiRequest<{ versions: AICostVersion[] }>(endpoints.adminAIProvidersCostVersions(provider, category));
+      setCostVersions(res.versions || []);
+    } catch {
+      setCostVersions([]);
+    } finally {
+      setVersionsLoading(false);
+    }
+  };
 
   const fetchData = React.useCallback(async () => {
     try {
@@ -144,6 +177,7 @@ export function AdminAIProviders() {
   const activateProvider = async (id: string) => {
     try {
       await apiRequest(`${endpoints.adminAIProviders}/${id}/activate`, { method: 'POST' });
+      setValidationStatus((prev) => ({ ...prev, [id]: 'valid' }));
       notify.success('Provider activated');
       await fetchData();
     } catch (err) {
@@ -154,18 +188,24 @@ export function AdminAIProviders() {
   const testConnection = async (id: string) => {
     setTestingId(id);
     try {
-      const result = await apiRequest<{ ok: boolean; message: string; latencyMs: number }>(
+      const result = await apiRequest<{ ok: boolean; message: string; latencyMs: number; activated?: boolean }>(
         `${endpoints.adminAIProviders}/${id}/test`,
         { method: 'POST' },
       );
       setTestResults((prev) => ({ ...prev, [id]: result }));
+      setValidationStatus((prev) => ({ ...prev, [id]: result.ok ? 'valid' : 'invalid' }));
       if (result.ok) {
-        notify.success('Connection OK', `${result.message} (${result.latencyMs}ms)`);
+        if (result.activated) {
+          notify.success('Connection OK & Activated', `${result.message} (${result.latencyMs}ms)`);
+        } else {
+          notify.success('Connection OK', `${result.message} (${result.latencyMs}ms)`);
+        }
       } else {
         notify.error('Connection failed', result.message);
       }
     } catch (err) {
       setTestResults((prev) => ({ ...prev, [id]: { ok: false, message: (err as Error).message } }));
+      setValidationStatus((prev) => ({ ...prev, [id]: 'invalid' }));
       notify.error('Test failed', (err as Error).message);
     } finally {
       setTestingId(null);
@@ -178,7 +218,7 @@ export function AdminAIProviders() {
     const model = newProvider.model || option?.defaultModel || '';
 
     try {
-      await apiRequest(endpoints.adminAIProviders, {
+      const result = await apiRequest<{ provider: any; validation: any }>(endpoints.adminAIProviders, {
         method: 'POST',
         body: JSON.stringify({
           category,
@@ -189,7 +229,18 @@ export function AdminAIProviders() {
           model,
         }),
       });
-      notify.success('Provider added');
+      
+      if (result.validation) {
+        setValidationStatus(prev => ({ ...prev, [result.provider.id]: result.validation.ok ? 'valid' : 'invalid' }));
+        if (result.validation.ok) {
+          notify.success('Provider added & validated');
+        } else {
+          notify.info('Provider added but validation failed', result.validation.message);
+        }
+      } else {
+        notify.success('Provider added');
+      }
+      
       setShowAddForm(null);
       setNewProvider({ provider: '', displayName: '', apiKey: '', baseUrl: '', model: '' });
       await fetchData();
@@ -211,16 +262,59 @@ export function AdminAIProviders() {
 
   const saveCost = async (provider: string, category: string) => {
     try {
-      await apiRequest(endpoints.adminAIProvidersCosts, {
+      const res = await apiRequest<{ marginStatus?: string; lossPackages?: string[]; message?: string }>(endpoints.adminAIProvidersCosts, {
         method: 'PUT',
         body: JSON.stringify({ provider, category, ...costForm }),
       });
-      notify.success('Cost config saved');
+      if (res.marginStatus === 'WARNING') {
+        notify.info('Proposal created (margin warning)', 'One or more packages are running at 0–30% margin. Proposal now awaits admin approval.');
+      } else {
+        notify.success('Proposal created', res.message || 'Pricing change now awaits admin approval.');
+      }
       setEditingCost(null);
       await fetchData();
     } catch (err) {
-      notify.error('Failed to save', (err as Error).message);
+      const msg = (err as { message?: string }).message || '';
+      notify.error('Failed to save', msg.startsWith('Pricing change blocked') ? msg : msg);
     }
+  };
+
+  const approveVersion = async (id: string) => {
+    try {
+      const res = await apiRequest<{ marginStatus?: string; error?: string }>(endpoints.adminAIProviderCostVersionApprove(id), { method: 'POST' });
+      if (res.error) {
+        notify.error('Approval rejected', res.error);
+      } else {
+        notify.success('Pricing version approved', `Now active. Margin: ${res.marginStatus}`);
+      }
+      if (versionsFor) await loadCostVersions(versionsFor.provider, versionsFor.category);
+      await fetchData();
+    } catch (err) {
+      notify.error('Failed to approve', (err as { message?: string }).message || (err as Error).message);
+    }
+  };
+
+  const rejectVersion = async (id: string) => {
+    if (!confirm('Reject this pricing proposal?')) return;
+    try {
+      await apiRequest(endpoints.adminAIProviderCostVersionReject(id), { method: 'POST' });
+      notify.success('Pricing proposal rejected');
+      if (versionsFor) await loadCostVersions(versionsFor.provider, versionsFor.category);
+      await fetchData();
+    } catch (err) {
+      notify.error('Failed to reject', (err as Error).message);
+    }
+  };
+
+  const statusBadge = (status: string, active: boolean) => {
+    const map: Record<string, { label: string; cls: string }> = {
+      approved: { label: active ? 'Active' : 'Approved', cls: active ? 'bg-green-100 text-green-700' : 'bg-emerald-100 text-emerald-700' },
+      pending: { label: 'Pending', cls: 'bg-amber-100 text-amber-700' },
+      superseded: { label: 'Superseded', cls: 'bg-slate-100 text-slate-500' },
+      rejected: { label: 'Rejected', cls: 'bg-red-100 text-red-700' },
+    };
+    const b = map[status] || { label: status, cls: 'bg-slate-100 text-slate-500' };
+    return <span className={`rounded-full px-2 py-0.5 text-xs font-medium ${b.cls}`}>{b.label}</span>;
   };
 
   if (loading) {
@@ -236,9 +330,65 @@ export function AdminAIProviders() {
     );
   }
 
+  const testAllProviders = async () => {
+    const allProviderIds = Object.values(providers).flat().map(p => p.id);
+    if (allProviderIds.length === 0) {
+      notify.info('No providers to test');
+      return;
+    }
+    
+    notify.info('Testing all providers...', 'This may take a moment');
+    
+    for (const id of allProviderIds) {
+      setTestingId(id);
+      try {
+        const result = await apiRequest<{ ok: boolean; message: string; latencyMs: number; activated?: boolean }>(
+          `${endpoints.adminAIProviders}/${id}/test`,
+          { method: 'POST' },
+        );
+        setTestResults((prev) => ({ ...prev, [id]: result }));
+        setValidationStatus((prev) => ({ ...prev, [id]: result.ok ? 'valid' : 'invalid' }));
+      } catch (err) {
+        setTestResults((prev) => ({ ...prev, [id]: { ok: false, message: (err as Error).message } }));
+        setValidationStatus((prev) => ({ ...prev, [id]: 'invalid' }));
+      }
+      setTestingId(null);
+      // Small delay to avoid rate limiting
+      await new Promise(r => setTimeout(r, 500));
+    }
+    
+    const validCount = Object.values(validationStatus).filter(s => s === 'valid').length;
+    notify.success(`Testing complete`, `${validCount}/${allProviderIds.length} providers validated`);
+  };
+
+  const allProviders = Object.values(providers).flat();
+  const providerNameById: Record<string, string> = {};
+  for (const p of allProviders) providerNameById[p.id] = p.displayName;
+
+  const configuredProviderKeys = new Set<string>();
+  for (const p of allProviders) {
+    if (p.apiKey) configuredProviderKeys.add(`${p.category}:${p.provider}`);
+  }
+  const visibleCosts = costs.filter((c) => configuredProviderKeys.has(`${c.category}:${c.provider}`));
+  const costsByCategory = (['stt', 'llm', 'image'] as const)
+    .map((cat) => ({ category: cat, items: visibleCosts.filter((c) => c.category === cat) }))
+    .filter((g) => g.items.length > 0);
+
   return (
     <AdminLayout>
-      <AdminHeader title="AI Providers" description="Manage AI service providers, costs, and usage." />
+      <AdminHeader 
+        title="AI Providers" 
+        description="Manage AI service providers, costs, and usage."
+        action={
+          <button
+            onClick={testAllProviders}
+            disabled={Object.values(providers).flat().length === 0}
+            className="rounded-lg border border-slate-200 px-3 py-1.5 text-xs font-medium hover:bg-slate-50 disabled:opacity-50 dark:border-slate-600 dark:hover:bg-slate-700"
+          >
+            Test All Providers
+          </button>
+        }
+      />
 
       {/* Usage Summary */}
       {stats && (
@@ -322,22 +472,43 @@ export function AdminAIProviders() {
                         : 'border-slate-200 dark:border-slate-700'
                     }`}
                   >
-                    <div className="mb-3 flex items-center justify-between">
-                      <div>
-                        <h3 className="font-semibold">{p.displayName}</h3>
-                        <p className="text-xs text-slate-500">{p.provider} • {p.model}</p>
-                      </div>
-                      {p.isActive ? (
-                        <CheckCircleIcon className="h-5 w-5 text-green-500" />
-                      ) : (
-                        <XCircleIcon className="h-5 w-5 text-slate-300" />
-                      )}
-                    </div>
+<div className="mb-3 flex items-center justify-between">
+                       <div>
+                         <h3 className="font-semibold">{p.displayName}</h3>
+                         <p className="text-xs text-slate-500">{p.provider} • {p.model}</p>
+                       </div>
+                       <div className="flex items-center gap-2">
+                         {(() => {
+                           const status = validationStatus[p.id];
+                           if (status === 'valid') {
+                             return <span className="rounded-full bg-green-100 px-2 py-0.5 text-xs font-medium text-green-700">✓ Validated</span>;
+                           }
+                           if (status === 'invalid') {
+                             return <span className="rounded-full bg-red-100 px-2 py-0.5 text-xs font-medium text-red-700">✗ Failed</span>;
+                           }
+                           if (p.apiKey) {
+                             return <span className="rounded-full bg-yellow-100 px-2 py-0.5 text-xs font-medium text-yellow-700">⟳ Untested</span>;
+                           }
+                           return <span className="rounded-full bg-slate-100 px-2 py-0.5 text-xs font-medium text-slate-500">No API Key</span>;
+                         })()}
+                         {p.isActive ? (
+                           <CheckCircleIcon className="h-5 w-5 text-green-500" />
+                         ) : (
+                           <XCircleIcon className="h-5 w-5 text-slate-300" />
+                         )}
+                       </div>
+                     </div>
 
                     <div className="mb-3 space-y-1 text-xs text-slate-500">
                       <p>Key: {p.apiKey || 'Not set'}</p>
                       <p>Base URL: {p.baseUrl || 'Default'}</p>
                     </div>
+
+                    {stats && stats.byProvider[p.id] && (
+                      <div className="mb-3 rounded-lg bg-slate-50 p-2 text-xs text-slate-600 dark:bg-slate-700/50 dark:text-slate-400">
+                        {stats.byProvider[p.id].requests.toLocaleString()} requests · {(stats.byProvider[p.id].tokensInput + stats.byProvider[p.id].tokensOutput).toLocaleString()} tokens · ${(stats.byProvider[p.id].costCents / 100).toFixed(2)}
+                      </div>
+                    )}
 
                     {testResult && (
                       <div className={`mb-3 rounded-lg p-2 text-xs ${
@@ -417,13 +588,13 @@ export function AdminAIProviders() {
                     onChange={(e) => setNewProvider({ ...newProvider, model: e.target.value })}
                     className="mb-2 w-full rounded-lg border border-slate-300 px-3 py-1.5 text-sm"
                   />
-                  <div className="flex gap-2">
-                    <button
-                      onClick={() => addProvider(category)}
-                      className="rounded-lg bg-indigo-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-indigo-700"
-                    >
-                      Save
-                    </button>
+<div className="flex gap-2">
+                      <button
+                        onClick={() => addProvider(category)}
+                        className="rounded-lg bg-indigo-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-indigo-700"
+                      >
+                        Save & Test
+                      </button>
                     <button
                       onClick={() => { setShowAddForm(null); setNewProvider({ provider: '', displayName: '', apiKey: '', baseUrl: '', model: '' }); }}
                       className="rounded-lg border border-slate-300 px-3 py-1.5 text-xs font-medium hover:bg-slate-50"
@@ -449,82 +620,171 @@ export function AdminAIProviders() {
       {/* Cost Configuration */}
       <div className="mb-8">
         <h2 className="mb-4 text-lg font-semibold">Cost Configuration</h2>
-        <div className="overflow-x-auto rounded-xl border border-slate-200 bg-white dark:border-slate-700 dark:bg-slate-800">
-          <table className="w-full text-sm">
-            <thead>
-              <tr className="border-b border-slate-200 bg-slate-50 text-left text-xs font-medium uppercase text-slate-500 dark:border-slate-700 dark:bg-slate-800">
-                <th className="px-4 py-3">Provider</th>
-                <th className="px-4 py-3">Category</th>
-                <th className="px-4 py-3">Cost/1M Input</th>
-                <th className="px-4 py-3">Cost/1M Output</th>
-                <th className="px-4 py-3">Cost/Image</th>
-                <th className="px-4 py-3">Cost/Min Audio</th>
-                <th className="px-4 py-3"></th>
-              </tr>
-            </thead>
-            <tbody>
-              {costs.length === 0 ? (
-                <tr>
-                  <td colSpan={7} className="px-4 py-8 text-center text-slate-400">
-                    No cost configurations yet. Add a provider and activate it first.
-                  </td>
-                </tr>
-              ) : (
-                costs.map((c) => (
-                  <tr key={c.id} className="border-b border-slate-100 dark:border-slate-700/50">
-                    <td className="px-4 py-3 font-medium">{c.provider}</td>
-                    <td className="px-4 py-3">{c.category}</td>
-                    {editingCost === c.id ? (
-                      <>
-                        <td className="px-4 py-3">
-                          <input type="number" value={costForm.costPer1MInputTokens ?? c.costPer1MInputTokens}
-                            onChange={(e) => setCostForm({ ...costForm, costPer1MInputTokens: Number(e.target.value) })}
-                            className="w-20 rounded border border-slate-300 px-2 py-1 text-xs"
-                          />
-                        </td>
-                        <td className="px-4 py-3">
-                          <input type="number" value={costForm.costPer1MOutputTokens ?? c.costPer1MOutputTokens}
-                            onChange={(e) => setCostForm({ ...costForm, costPer1MOutputTokens: Number(e.target.value) })}
-                            className="w-20 rounded border border-slate-300 px-2 py-1 text-xs"
-                          />
-                        </td>
-                        <td className="px-4 py-3">
-                          <input type="number" value={costForm.costPerImage ?? c.costPerImage}
-                            onChange={(e) => setCostForm({ ...costForm, costPerImage: Number(e.target.value) })}
-                            className="w-20 rounded border border-slate-300 px-2 py-1 text-xs"
-                          />
-                        </td>
-                        <td className="px-4 py-3">
-                          <input type="number" value={costForm.costPerAudioMinute ?? c.costPerAudioMinute}
-                            onChange={(e) => setCostForm({ ...costForm, costPerAudioMinute: Number(e.target.value) })}
-                            className="w-20 rounded border border-slate-300 px-2 py-1 text-xs"
-                          />
-                        </td>
-                        <td className="px-4 py-3">
-                          <button onClick={() => saveCost(c.provider, c.category)}
-                            className="rounded bg-green-600 px-2 py-1 text-xs text-white hover:bg-green-700"
-                          >Save</button>
-                        </td>
-                      </>
-                    ) : (
-                      <>
-                        <td className="px-4 py-3">${(c.costPer1MInputTokens / 100).toFixed(4)}</td>
-                        <td className="px-4 py-3">${(c.costPer1MOutputTokens / 100).toFixed(4)}</td>
-                        <td className="px-4 py-3">${(c.costPerImage / 100).toFixed(2)}</td>
-                        <td className="px-4 py-3">${(c.costPerAudioMinute / 100).toFixed(2)}</td>
-                        <td className="px-4 py-3">
-                          <button onClick={() => { setEditingCost(c.id); setCostForm(c); }}
-                            className="rounded border border-slate-200 px-2 py-1 text-xs hover:bg-slate-50"
-                          >Edit</button>
-                        </td>
-                      </>
-                    )}
-                  </tr>
-                ))
-              )}
-            </tbody>
-          </table>
+        <p className="mb-4 text-xs text-slate-500">
+          Only shows providers whose API key is configured. Costs are grouped by category.
+        </p>
+        {costsByCategory.length === 0 ? (
+          <div className="rounded-xl border border-slate-200 bg-white p-8 text-center text-sm text-slate-400 dark:border-slate-700 dark:bg-slate-800">
+            No cost configurations for configured providers yet. Add a provider, set its API key, and activate it first.
+          </div>
+        ) : (
+          costsByCategory.map(({ category, items }) => {
+            const Icon = CATEGORY_ICONS[category] || BrainIcon;
+            return (
+              <div key={category} className="mb-6">
+                <div className="mb-2 flex items-center gap-2">
+                  <Icon className="h-4 w-4 text-indigo-600" />
+                  <h3 className="text-sm font-semibold">{CATEGORY_LABELS[category]}</h3>
+                </div>
+                <div className="overflow-x-auto rounded-xl border border-slate-200 bg-white dark:border-slate-700 dark:bg-slate-800">
+                  <table className="w-full text-sm">
+                    <thead>
+                      <tr className="border-b border-slate-200 bg-slate-50 text-left text-xs font-medium uppercase text-slate-500 dark:border-slate-700 dark:bg-slate-800">
+                        <th className="px-4 py-3">Provider</th>
+                        <th className="px-4 py-3">Cost/1M Input</th>
+                        <th className="px-4 py-3">Cost/1M Output</th>
+                        <th className="px-4 py-3">Cost/Image</th>
+                        <th className="px-4 py-3">Cost/Min Audio</th>
+                        <th className="px-4 py-3"></th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {items.map((c) => (
+                        <tr key={c.id} className="border-b border-slate-100 dark:border-slate-700/50">
+                          <td className="px-4 py-3 font-medium">{c.provider}</td>
+                          {editingCost === c.id ? (
+                            <>
+                              <td className="px-4 py-3">
+                                <input type="number" value={costForm.costPer1MInputTokens ?? c.costPer1MInputTokens}
+                                  onChange={(e) => setCostForm({ ...costForm, costPer1MInputTokens: Number(e.target.value) })}
+                                  className="w-20 rounded border border-slate-300 px-2 py-1 text-xs"
+                                />
+                              </td>
+                              <td className="px-4 py-3">
+                                <input type="number" value={costForm.costPer1MOutputTokens ?? c.costPer1MOutputTokens}
+                                  onChange={(e) => setCostForm({ ...costForm, costPer1MOutputTokens: Number(e.target.value) })}
+                                  className="w-20 rounded border border-slate-300 px-2 py-1 text-xs"
+                                />
+                              </td>
+                              <td className="px-4 py-3">
+                                <input type="number" value={costForm.costPerImage ?? c.costPerImage}
+                                  onChange={(e) => setCostForm({ ...costForm, costPerImage: Number(e.target.value) })}
+                                  className="w-20 rounded border border-slate-300 px-2 py-1 text-xs"
+                                />
+                              </td>
+                              <td className="px-4 py-3">
+                                <input type="number" value={costForm.costPerAudioMinute ?? c.costPerAudioMinute}
+                                  onChange={(e) => setCostForm({ ...costForm, costPerAudioMinute: Number(e.target.value) })}
+                                  className="w-20 rounded border border-slate-300 px-2 py-1 text-xs"
+                                />
+                              </td>
+                              <td className="px-4 py-3">
+                                <button onClick={() => saveCost(c.provider, c.category)}
+                                  className="rounded bg-green-600 px-2 py-1 text-xs text-white hover:bg-green-700"
+                                >Save</button>
+                              </td>
+                            </>
+                          ) : (
+                            <>
+                              <td className="px-4 py-3">${(c.costPer1MInputTokens / 100).toFixed(4)}</td>
+                              <td className="px-4 py-3">${(c.costPer1MOutputTokens / 100).toFixed(4)}</td>
+                              <td className="px-4 py-3">${(c.costPerImage / 100).toFixed(2)}</td>
+                              <td className="px-4 py-3">${(c.costPerAudioMinute / 100).toFixed(2)}</td>
+                              <td className="px-4 py-3">
+                                <button onClick={() => { setEditingCost(c.id); setCostForm(c); }}
+                                  className="rounded border border-slate-200 px-2 py-1 text-xs hover:bg-slate-50"
+                                >Edit</button>
+                              </td>
+                            </>
+                          )}
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            );
+          })
+        )}
+      </div>
+
+      {/* Pricing Versions */}
+      <div className="mb-8">
+        <h2 className="mb-2 text-lg font-semibold">Pricing Versions</h2>
+        <p className="mb-4 text-xs text-slate-500">
+          Every cost change creates a new pricing version that is reviewed before it takes effect: saving a cost creates a <strong>Pending</strong> proposal — it only becomes the active version after an admin approves it (approval re-runs the margin guard and blocks loss-making pricing). Historical usage keeps the version it was priced under — old versions are never mutated.
+        </p>
+        <div className="mb-3 flex flex-wrap gap-2">
+          {visibleCosts.map((c) => (
+            <button
+              key={c.id}
+              type="button"
+              onClick={() => loadCostVersions(c.provider, c.category)}
+              className={`rounded-lg border px-2.5 py-1.5 text-xs font-medium transition-colors ${
+                versionsFor?.provider === c.provider && versionsFor?.category === c.category
+                  ? 'border-indigo-500 bg-indigo-50 text-indigo-700 dark:bg-indigo-500/10 dark:text-indigo-300'
+                  : 'border-slate-200 text-slate-600 hover:bg-slate-50 dark:border-slate-700 dark:text-slate-300'
+              }`}
+            >
+              {c.provider} · {c.category}
+            </button>
+          ))}
         </div>
+        {versionsFor && (
+          <div className="overflow-x-auto rounded-xl border border-slate-200 bg-white dark:border-slate-700 dark:bg-slate-800">
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="border-b border-slate-200 bg-slate-50 text-left text-xs font-medium uppercase text-slate-500 dark:border-slate-700 dark:bg-slate-800">
+                  <th className="px-4 py-3">Version</th>
+                  <th className="px-4 py-3">Input/1M</th>
+                  <th className="px-4 py-3">Output/1M</th>
+                  <th className="px-4 py-3">Image</th>
+                  <th className="px-4 py-3">Audio/min</th>
+                  <th className="px-4 py-3">Effective From</th>
+                  <th className="px-4 py-3">Effective Until</th>
+                  <th className="px-4 py-3">Source</th>
+                  <th className="px-4 py-3">Status</th>
+                  <th className="px-4 py-3"></th>
+                </tr>
+              </thead>
+              <tbody>
+                {versionsLoading ? (
+                  <tr><td colSpan={10} className="px-4 py-8 text-center text-slate-400">Loading…</td></tr>
+                ) : costVersions.length === 0 ? (
+                  <tr><td colSpan={10} className="px-4 py-8 text-center text-slate-400">No versions yet.</td></tr>
+                ) : (
+                  costVersions.map((v) => (
+                    <tr key={v.id} className="border-b border-slate-100 dark:border-slate-700/50">
+                      <td className="px-4 py-3 font-medium">v{v.version}</td>
+                      <td className="px-4 py-3 font-mono">${(v.inputRate / 100).toFixed(4)}</td>
+                      <td className="px-4 py-3 font-mono">${(v.outputRate / 100).toFixed(4)}</td>
+                      <td className="px-4 py-3 font-mono">${(v.imageRate / 100).toFixed(2)}</td>
+                      <td className="px-4 py-3 font-mono">${(v.audioRate / 100).toFixed(2)}</td>
+                      <td className="px-4 py-3 text-xs text-slate-500">{new Date(v.effectiveFrom).toLocaleString()}</td>
+                      <td className="px-4 py-3 text-xs text-slate-500">{v.effectiveUntil ? new Date(v.effectiveUntil).toLocaleString() : 'active'}</td>
+                      <td className="px-4 py-3"><span className="rounded-full bg-slate-100 px-2 py-0.5 text-xs font-medium dark:bg-slate-700">{v.source}</span></td>
+                      <td className="px-4 py-3">{statusBadge(v.status, v.active)}</td>
+                      <td className="px-4 py-3">
+                        {v.status === 'pending' && (
+                          <div className="flex gap-2">
+                            <button onClick={() => approveVersion(v.id)}
+                              className="rounded bg-green-600 px-2 py-1 text-xs font-medium text-white hover:bg-green-700">
+                              Approve
+                            </button>
+                            <button onClick={() => rejectVersion(v.id)}
+                              className="rounded bg-red-600 px-2 py-1 text-xs font-medium text-white hover:bg-red-700">
+                              Reject
+                            </button>
+                          </div>
+                        )}
+                      </td>
+                    </tr>
+                  ))
+                )}
+              </tbody>
+            </table>
+          </div>
+        )}
       </div>
 
       {/* Usage History */}
@@ -562,7 +822,7 @@ export function AdminAIProviders() {
                         {log.category}
                       </span>
                     </td>
-                    <td className="px-4 py-3">{log.model}</td>
+                    <td className="px-4 py-3">{providerNameById[log.providerId] || log.model}</td>
                     <td className="px-4 py-3 text-xs text-slate-500">{log.feature}</td>
                     <td className="px-4 py-3">{log.tokensInput.toLocaleString()}</td>
                     <td className="px-4 py-3">{log.tokensOutput.toLocaleString()}</td>

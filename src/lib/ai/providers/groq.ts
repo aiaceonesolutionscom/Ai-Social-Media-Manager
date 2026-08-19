@@ -21,7 +21,7 @@ export const groqSTT: STTProviderAdapter = {
     if (!res.ok) throw new Error(`Groq STT failed ${res.status}: ${JSON.stringify(body.error ?? body)}`)
     const text = body.text?.trim()
     if (!text) throw new Error('Groq STT returned empty transcript')
-    return { text, durationMs: Date.now() - start }
+    return { text, durationMs: options?.durationMs ?? (Date.now() - start) }
   },
 
   async testConnection(apiKey: string, baseUrl: string, model: string): Promise<TestResult> {

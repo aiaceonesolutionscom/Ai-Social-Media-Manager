@@ -11,6 +11,30 @@ function timestamp(): string {
   return new Date().toISOString()
 }
 
+let dbReady = false
+export function setLoggerDbReady(ready: boolean): void {
+  dbReady = ready
+}
+
+async function persistError(obj: unknown, msg?: string): Promise<void> {
+  if (!dbReady) return
+  try {
+    const { createErrorLog } = await import('../store.js')
+    const details =
+      typeof obj === 'object' && obj !== null
+        ? { ...(obj as Record<string, unknown>) }
+        : {}
+    await createErrorLog({
+      source: typeof details.source === 'string' && details.source ? details.source : 'app',
+      message: msg || (typeof obj === 'string' ? obj : String(details.msg || '')),
+      stack: typeof details.stack === 'string' ? details.stack : undefined,
+      details,
+    })
+  } catch {
+    // Never let logging crash the app.
+  }
+}
+
 function write(level: string, obj: unknown, msg?: string): void {
   const record =
     typeof obj === 'string'
@@ -19,6 +43,7 @@ function write(level: string, obj: unknown, msg?: string): void {
   const line = JSON.stringify(record)
   if (level === 'error') {
     process.stderr.write(line + '\n')
+    void persistError(obj, msg)
   } else {
     process.stdout.write(line + '\n')
   }

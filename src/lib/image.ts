@@ -1,8 +1,9 @@
 import { deflateSync } from 'node:zlib'
 import { providerManager } from './ai/providerManager.js'
+import { type ImageSize } from './imageSize.js'
 
-export async function generateImage(prompt: string): Promise<Buffer> {
-  return providerManager.generateImage(prompt)
+export async function generateImage(prompt: string, phone?: string, size?: ImageSize): Promise<Buffer> {
+  return providerManager.generateImage(prompt, phone, size ? { size } : undefined)
 }
 
 const CRC_TABLE = (() => {

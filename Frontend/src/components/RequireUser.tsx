@@ -8,7 +8,7 @@ interface RequireUserProps {
 }
 
 export function RequireUser({ children }: RequireUserProps): React.ReactElement {
-  const { user, isAuthenticated, loading } = useUserAuth()
+  const { isAuthenticated, loading } = useUserAuth()
   const { isSignedIn } = useAuth()
   const [showFallback, setShowFallback] = useState(false)
 

@@ -148,7 +148,7 @@ describe('package lifecycle — purchase replaces, expiry locks, end forfeits', 
 
     const posts = await listPosts()
     expect(posts[0].status).toBe('AWAITING_APPROVAL')
-    expect(posts[0].tokensCharged).toBeUndefined()
+    expect(posts[0].tokensCharged).toBe(0)
     expect(posts[0].tokensChargedAction).toBeUndefined()
 
     const user = await getUser(PHONE)

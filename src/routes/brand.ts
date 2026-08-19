@@ -1,6 +1,6 @@
 import { FastifyInstance } from 'fastify'
 import { verifySession } from '../lib/userAuth.js'
-import { getBrandProfile, saveBrandProfile } from '../store.js'
+import { getBrandProfile, saveBrandProfile, getUserPreferences, saveUserPreferences } from '../store.js'
 import { requireFeature } from '../lib/packagePermissions.js'
 import { saveBrandLogo, brandLogoUrl } from '../lib/branding.js'
 
@@ -19,6 +19,9 @@ export function serializeBrandProfile(profile: any): Record<string, unknown> {
     voice: profile.voice || '',
     toneGuidelines: profile.toneGuidelines || '',
     colors: Array.isArray(profile.colors) ? profile.colors : [],
+    address: profile.address || '',
+    website: profile.website || '',
+    contact: profile.contact || '',
     logoUrl: brandLogoUrl(profile.logoPath),
   }
 }
@@ -58,6 +61,9 @@ export async function registerBrandRoutes(server: FastifyInstance): Promise<void
       tagline: typeof body.tagline === 'string' ? body.tagline.trim() : (existing as any)?.tagline || '',
       voice: typeof body.voice === 'string' ? body.voice.trim() : (existing as any)?.voice || '',
       toneGuidelines: typeof body.toneGuidelines === 'string' ? body.toneGuidelines.trim() : (existing as any)?.toneGuidelines || '',
+      address: typeof body.address === 'string' ? body.address.trim() : (existing as any)?.address || '',
+      website: typeof body.website === 'string' ? body.website.trim() : (existing as any)?.website || '',
+      contact: typeof body.contact === 'string' ? body.contact.trim() : (existing as any)?.contact || '',
       colors,
     }
 
@@ -91,5 +97,41 @@ export async function registerBrandRoutes(server: FastifyInstance): Promise<void
     await saveBrandProfile(phone, { ...(existing ?? {}), logoPath })
 
     return reply.send({ success: true, logoPath, logoUrl: brandLogoUrl(logoPath) })
+  })
+
+  // Get user branding settings (custom_branding feature required).
+  server.get('/api/brand/settings', async (req: any, reply: any) => {
+    const phone = await requireUser(req)
+    if (!phone) return reply.status(401).send({ error: 'Unauthorized' })
+
+    try {
+      await requireFeature(phone, 'custom_branding')
+    } catch (err: any) {
+      return reply.status(403).send({ error: err.message })
+    }
+
+    const prefs = await getUserPreferences(phone)
+    return reply.send({ brandingEnabled: prefs?.brandingEnabled ?? true })
+  })
+
+  // Update user branding settings (custom_branding feature required).
+  server.put('/api/brand/settings', async (req: any, reply: any) => {
+    const phone = await requireUser(req)
+    if (!phone) return reply.status(401).send({ error: 'Unauthorized' })
+
+    try {
+      await requireFeature(phone, 'custom_branding')
+    } catch (err: any) {
+      return reply.status(403).send({ error: err.message })
+    }
+
+    const { brandingEnabled } = (req.body ?? {}) as { brandingEnabled?: boolean }
+    if (typeof brandingEnabled !== 'boolean') {
+      return reply.status(400).send({ error: 'brandingEnabled must be a boolean' })
+    }
+
+    const prefs = await getUserPreferences(phone)
+    await saveUserPreferences(phone, { ...(prefs ?? {}), brandingEnabled })
+    return reply.send({ success: true, brandingEnabled })
   })
 }

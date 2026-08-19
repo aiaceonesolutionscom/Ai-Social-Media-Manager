@@ -9,6 +9,9 @@ const DEFAULTS: Record<string, string> = {
   'api_versions.facebook': 'v21.0',
   'api_versions.instagram': 'v21.0',
   'api_versions.meta_ads': 'v21.0',
+  'token_refresh.check_interval_hours': '24',
+  'token_refresh.warning_days': '7',
+  'token_refresh.auto_refresh': 'true',
 }
 
 class MetaConfigManager {
@@ -110,6 +113,10 @@ class MetaConfigManager {
     return this.getValue('whatsapp', 'phone_number_id') || process.env.WHATSAPP_PHONE_NUMBER_ID || ''
   }
 
+  getWhatsAppDisplayNumber(): string {
+    return this.getValue('whatsapp', 'display_phone_number') || process.env.WHATSAPP_DISPLAY_PHONE_NUMBER || ''
+  }
+
   getWhatsAppBusinessAccountId(): string {
     return this.getValue('whatsapp', 'business_account_id') || process.env.WHATSAPP_BUSINESS_ACCOUNT_ID || ''
   }
@@ -146,6 +153,20 @@ class MetaConfigManager {
     return !!(this.getVerifyToken() && this.getWebhookSecret())
   }
 
+  // ---- Token Refresh ----
+
+  getTokenRefreshIntervalHours(): number {
+    return Number(this.getValue('token_refresh', 'check_interval_hours')) || 24
+  }
+
+  getTokenRefreshWarningDays(): number {
+    return Number(this.getValue('token_refresh', 'warning_days')) || 7
+  }
+
+  getTokenAutoRefreshEnabled(): boolean {
+    return this.getValue('token_refresh', 'auto_refresh') !== 'false'
+  }
+
   getStatus(): {
     configured: boolean
     appId: string
@@ -154,6 +175,9 @@ class MetaConfigManager {
     whatsappConnected: boolean
     webhookConfigured: boolean
     oauthConfigured: boolean
+    tokenRefreshIntervalHours: number
+    tokenRefreshWarningDays: number
+    tokenAutoRefreshEnabled: boolean
   } {
     return {
       configured: this.isConfigured(),
@@ -163,6 +187,9 @@ class MetaConfigManager {
       whatsappConnected: this.isWhatsAppConfigured(),
       webhookConfigured: this.isWebhookConfigured(),
       oauthConfigured: !!this.getOAuthRedirectUri(),
+      tokenRefreshIntervalHours: this.getTokenRefreshIntervalHours(),
+      tokenRefreshWarningDays: this.getTokenRefreshWarningDays(),
+      tokenAutoRefreshEnabled: this.getTokenAutoRefreshEnabled(),
     }
   }
 }

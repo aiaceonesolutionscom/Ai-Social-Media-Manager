@@ -54,12 +54,21 @@ export function AdminPackages() {
   const [editing, setEditing] = React.useState<PricingPackage | null>(null);
   const [formOpen, setFormOpen] = React.useState(false);
   const [pendingDelete, setPendingDelete] = React.useState<PricingPackage | null>(null);
+  const [profitability, setProfitability] = React.useState<Map<string, any>>(new Map());
 
   const fetchPackages = async () => {
     try {
-      const data = await apiRequest<{ packages: any[]; defaultPackage?: string }>(endpoints.adminPackages);
-      setItems(data.packages.map(fromApiPackage));
-      if (data.defaultPackage) setDefaultSlug(data.defaultPackage);
+      const [pkgData, profData] = await Promise.all([
+        apiRequest<{ packages: any[]; defaultPackage?: string }>(endpoints.adminPackages),
+        apiRequest<any>(endpoints.adminBillingProfitability).catch(() => null),
+      ]);
+      setItems(pkgData.packages.map(fromApiPackage));
+      if (pkgData.defaultPackage) setDefaultSlug(pkgData.defaultPackage);
+      if (profData?.packages) {
+        const map = new Map<string, any>();
+        profData.packages.forEach((p: any) => map.set(p.packageId, p));
+        setProfitability(map);
+      }
     } catch (err) {
       if (err instanceof ApiError && err.status === 401) {
         setAuthToken(null);
@@ -160,17 +169,25 @@ export function AdminPackages() {
   const columns: Array<Column<PricingPackage>> = [
     {
       key: 'name', header: 'Name',
-      render: (p) => (
-        <span className="font-medium text-slate-900 dark:text-slate-100">
-          {p.name}
-          {p.popular && <span className="ml-2 font-mono text-[10px] uppercase text-indigo-600">popular</span>}
-          {p.id === defaultSlug && (
-            <span className="ml-2 inline-flex items-center rounded-full bg-emerald-100 px-2 py-0.5 text-[10px] font-bold text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-300">
-              DEFAULT
-            </span>
-          )}
-        </span>
-      )
+      render: (p) => {
+        const prof = profitability.get(p.id);
+        return (
+          <span className="font-medium text-slate-900 dark:text-slate-100">
+            {p.name}
+            {p.popular && <span className="ml-2 font-mono text-[10px] uppercase text-indigo-600">popular</span>}
+            {p.id === defaultSlug && (
+              <span className="ml-2 inline-flex items-center rounded-full bg-emerald-100 px-2 py-0.5 text-[10px] font-bold text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-300">
+                DEFAULT
+              </span>
+            )}
+            {prof && (
+              <Badge tone={prof.status === 'profitable' ? 'emerald' : prof.status === 'warning' ? 'amber' : 'red'} className="ml-2">
+                {prof.status === 'profitable' ? 'PROFITABLE' : prof.status === 'warning' ? 'WARNING' : 'LOSS'}
+              </Badge>
+            )}
+          </span>
+        );
+      }
     },
     {
       key: 'type', header: 'Type',
@@ -182,7 +199,27 @@ export function AdminPackages() {
       }
     },
     { key: 'price', header: 'Price', render: (p) => <span className="font-mono">{formatCurrency(p.price)}</span> },
-    { key: 'tokens', header: 'Tokens', render: (p) => <span className="font-mono">{p.tokens.toLocaleString()}</span> },
+    { key: 'tokens', header: 'Credits', render: (p) => <span className="font-mono">{p.tokens.toLocaleString()}</span> },
+    {
+      key: 'profit', header: 'Profit/Credit',
+      render: (p) => {
+        const prof = profitability.get(p.id);
+        if (!prof) return <span className="text-slate-400">—</span>;
+        return <span className="font-mono text-xs">{formatCurrency(prof.revenuePerCreditCents / 100)}</span>;
+      }
+    },
+    {
+      key: 'margin', header: 'Margin',
+      render: (p) => {
+        const prof = profitability.get(p.id);
+        if (!prof) return <span className="text-slate-400">—</span>;
+        return (
+          <Badge tone={prof.marginPct >= 30 ? 'emerald' : prof.marginPct > 0 ? 'amber' : 'red'}>
+            {prof.marginPct.toFixed(0)}%
+          </Badge>
+        );
+      }
+    },
     {
       key: 'status', header: 'Status',
       render: (p) => <Badge tone={p.status === 'active' ? 'emerald' : 'slate'}>{p.status}</Badge>

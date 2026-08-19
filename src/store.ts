@@ -3,7 +3,7 @@ import fs from 'node:fs'
 import { randomUUID } from 'node:crypto'
 import { eq, desc, asc, and, sql, inArray } from 'drizzle-orm'
 import { getDb, getPool } from './db.js'
-import { posts, messages, conversations, postEdits, userPreferences, brandProfile, packages, topupBundles, users, tokenTransactions, socialAccounts, adminConfig, adminUsers, payments, userSessions, adCampaigns, aiProviders, aiUsageLogs, aiProviderCosts, metaConfig, supportTickets, supportReplies, auditLogs, webhookEvents, scheduledPosts } from './db/schema.js'
+import { posts, messages, conversations, postEdits, userPreferences, brandProfile, packages, topupBundles, users, tokenTransactions, socialAccounts, adminConfig, adminUsers, payments, userSessions, adCampaigns, aiProviders, aiUsageLogs, aiProviderCosts, aiProviderCostVersions, metaConfig, supportTickets, supportReplies, auditLogs, webhookEvents, scheduledPosts, notifications, errorLogs } from './db/schema.js'
 import { logger } from './lib/logger.js'
 import { storageDir } from './storage.js'
 import { encryptSecret, decryptSecret } from './lib/crypto.js'
@@ -17,20 +17,26 @@ function postFromRow(row: typeof posts.$inferSelect): Post {
     status: (row.stage as PostStage) || 'NEW',
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
+    tokensCharged: (row.tokensCharged != null ? row.tokensCharged : (data.tokensCharged as number | undefined)) ?? undefined,
+    tokensChargedAction: row.tokensChargedAction || (data.tokensChargedAction as string | undefined) || undefined,
+    refundedAt: row.refundedAt || (data.refundedAt as string | undefined) || undefined,
     ...data,
   } as Post
 }
 
 function postToRow(post: Post) {
-  const { id, phone, status, createdAt, updatedAt, ...rest } = post
+  const { id, phone, status, createdAt, updatedAt, tokensCharged, tokensChargedAction, refundedAt, ...rest } = post
   return {
     id,
     phone,
     stage: status ?? 'NEW',
     createdAt,
     updatedAt,
+    tokensCharged: tokensCharged ?? 0,
+    tokensChargedAction: tokensChargedAction ?? null,
+    refundedAt: refundedAt ?? null,
     data: rest as Record<string, unknown>,
-  } as { id: string; phone: string; stage: string; createdAt: string; updatedAt: string; data: Record<string, unknown> }
+  }
 }
 
 export async function initStore(): Promise<void> {
@@ -219,16 +225,23 @@ export async function initStore(): Promise<void> {
       ad_content JSONB NOT NULL,
       targeting JSONB NOT NULL,
       budget_cents INTEGER NOT NULL,
+      budget_type TEXT NOT NULL DEFAULT 'daily',
+      currency TEXT NOT NULL DEFAULT 'USD',
+      start_date TEXT,
+      end_date TEXT,
       campaign_id TEXT,
       ad_set_id TEXT,
       ad_id TEXT,
+      creative_id TEXT,
       image_url TEXT,
+      publish_at TEXT,
       created_at TEXT NOT NULL,
-      updated_at TEXT NOT NULL
+      updated_at TEXT NOT NULL,
+      charged_tokens INTEGER NOT NULL DEFAULT 0,
+      charged_at TEXT
     );
     CREATE INDEX IF NOT EXISTS idx_ad_campaigns_phone ON ad_campaigns(phone);
     CREATE INDEX IF NOT EXISTS idx_ad_campaigns_status ON ad_campaigns(status);
-    ALTER TABLE ad_campaigns ADD COLUMN IF NOT EXISTS publish_at TEXT;
 
     CREATE TABLE IF NOT EXISTS ai_providers (
       id TEXT PRIMARY KEY,
@@ -369,6 +382,119 @@ export async function initStore(): Promise<void> {
   await pool.query(`ALTER TABLE packages ADD COLUMN IF NOT EXISTS billing_period TEXT NOT NULL DEFAULT 'monthly'`)
   await pool.query(`ALTER TABLE packages ADD COLUMN IF NOT EXISTS yearly_price_cents INTEGER NOT NULL DEFAULT 0`)
   await pool.query(`ALTER TABLE packages ADD COLUMN IF NOT EXISTS setup_type TEXT NOT NULL DEFAULT 'none'`)
+
+  // Billing hardening: atomic charge-once columns
+  await pool.query(`ALTER TABLE posts ADD COLUMN IF NOT EXISTS tokens_charged INTEGER NOT NULL DEFAULT 0`)
+  await pool.query(`ALTER TABLE posts ADD COLUMN IF NOT EXISTS tokens_charged_action TEXT`)
+  await pool.query(`ALTER TABLE posts ADD COLUMN IF NOT EXISTS refunded_at TEXT`)
+  await pool.query(`ALTER TABLE ad_campaigns ADD COLUMN IF NOT EXISTS charged_tokens INTEGER NOT NULL DEFAULT 0`)
+  await pool.query(`ALTER TABLE ad_campaigns ADD COLUMN IF NOT EXISTS charged_at TEXT`)
+  await pool.query(`ALTER TABLE ad_campaigns ADD COLUMN IF NOT EXISTS budget_type TEXT`)
+  await pool.query(`ALTER TABLE ad_campaigns ADD COLUMN IF NOT EXISTS currency TEXT`)
+  await pool.query(`ALTER TABLE ad_campaigns ADD COLUMN IF NOT EXISTS start_date TEXT`)
+  await pool.query(`ALTER TABLE ad_campaigns ADD COLUMN IF NOT EXISTS end_date TEXT`)
+  await pool.query(`ALTER TABLE ad_campaigns ADD COLUMN IF NOT EXISTS campaign_id TEXT`)
+  await pool.query(`ALTER TABLE ad_campaigns ADD COLUMN IF NOT EXISTS ad_set_id TEXT`)
+  await pool.query(`ALTER TABLE ad_campaigns ADD COLUMN IF NOT EXISTS ad_id TEXT`)
+  await pool.query(`ALTER TABLE ad_campaigns ADD COLUMN IF NOT EXISTS creative_id TEXT`)
+  await pool.query(`ALTER TABLE ad_campaigns ADD COLUMN IF NOT EXISTS image_url TEXT`)
+  await pool.query(`ALTER TABLE ai_usage_logs ADD COLUMN IF NOT EXISTS audio_seconds INTEGER NOT NULL DEFAULT 0`)
+  await pool.query(`ALTER TABLE ai_usage_logs ADD COLUMN IF NOT EXISTS image_count INTEGER NOT NULL DEFAULT 0`)
+
+  // Pricing versioning columns
+  await pool.query(`ALTER TABLE ai_usage_logs ADD COLUMN IF NOT EXISTS pricing_version_id TEXT`)
+  await pool.query(`ALTER TABLE ai_usage_logs ADD COLUMN IF NOT EXISTS unpriced BOOLEAN NOT NULL DEFAULT false`)
+  await pool.query(`ALTER TABLE ai_usage_logs ADD COLUMN IF NOT EXISTS cached_input_tokens INTEGER NOT NULL DEFAULT 0`)
+  await pool.query(`ALTER TABLE token_transactions ADD COLUMN IF NOT EXISTS operation_id TEXT`)
+
+  // Idempotency claims: dedupe existing rows by operation_id, then enforce unique index
+  await pool.query(`
+    DELETE FROM token_transactions WHERE id IN (
+      SELECT id FROM (SELECT id, ROW_NUMBER() OVER (PARTITION BY operation_id ORDER BY created_at DESC) rn
+                      FROM token_transactions WHERE operation_id IS NOT NULL) t WHERE rn > 1
+    )
+  `)
+  await pool.query(`CREATE UNIQUE INDEX IF NOT EXISTS idx_token_tx_operation_id ON token_transactions(operation_id)`)
+
+  // Stripe idempotency: dedupe existing rows, then enforce unique index
+  await pool.query(`
+    DELETE FROM payments WHERE id IN (
+      SELECT id FROM (SELECT id, ROW_NUMBER() OVER (PARTITION BY stripe_session_id ORDER BY created_at DESC) rn
+                      FROM payments WHERE stripe_session_id IS NOT NULL) t WHERE rn > 1
+    )
+  `)
+  await pool.query(`CREATE UNIQUE INDEX IF NOT EXISTS idx_payments_stripe_unique ON payments(stripe_session_id) WHERE stripe_session_id IS NOT NULL`)
+
+  // Pricing versioning: create table and seed from existing costs
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS ai_provider_cost_versions (
+      id TEXT PRIMARY KEY,
+      provider TEXT NOT NULL,
+      category TEXT NOT NULL,
+      version INTEGER NOT NULL,
+      input_rate INTEGER NOT NULL DEFAULT 0,
+      output_rate INTEGER NOT NULL DEFAULT 0,
+      cached_input_rate INTEGER NOT NULL DEFAULT 0,
+      image_rate INTEGER NOT NULL DEFAULT 0,
+      audio_rate INTEGER NOT NULL DEFAULT 0,
+      effective_from TEXT NOT NULL,
+      effective_until TEXT,
+      source TEXT NOT NULL DEFAULT 'seed',
+      last_verified_at TEXT,
+      active BOOLEAN NOT NULL DEFAULT true,
+      status TEXT NOT NULL DEFAULT 'pending',
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_ai_cost_versions_provider ON ai_provider_cost_versions(provider);
+    CREATE INDEX IF NOT EXISTS idx_ai_cost_versions_active ON ai_provider_cost_versions(active);
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_ai_cost_versions_pcv ON ai_provider_cost_versions(provider, category, version);
+    DROP INDEX IF EXISTS idx_ai_cost_versions_provider_category_active;
+  `)
+  // Pre-existing tables need the status column backfilled + the legacy active
+  // flag normalized BEFORE the "one active version" index can be created.
+  await pool.query(`ALTER TABLE ai_provider_cost_versions ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'pending'`)
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_ai_cost_versions_status ON ai_provider_cost_versions(status)`)
+  await pool.query(`UPDATE ai_provider_cost_versions SET status = CASE WHEN active THEN 'approved' ELSE 'superseded' END WHERE status = 'pending' AND source <> 'admin'`)
+  await pool.query(`
+    UPDATE ai_provider_cost_versions SET active = false, status = 'superseded', effective_until = created_at
+    WHERE id IN (
+      SELECT id FROM (
+        SELECT id, ROW_NUMBER() OVER (PARTITION BY provider, category ORDER BY created_at DESC) rn
+        FROM ai_provider_cost_versions WHERE active
+      ) t WHERE rn > 1
+    )
+  `)
+  await pool.query(`CREATE UNIQUE INDEX IF NOT EXISTS idx_ai_cost_versions_one_active ON ai_provider_cost_versions(provider, category) WHERE active`)
+  // Seed initial versions from existing ai_provider_costs (only if no versions exist yet)
+  await syncAICostVersionsFromCosts()
+
+  // Backfill pricing_version_id to the REAL version row uuid where a numeric
+  // version value was stored, then enforce a guarded FK (non-fatal on failure).
+  await pool.query(`
+    UPDATE ai_usage_logs u
+    SET pricing_version_id = v.id
+    FROM ai_provider_cost_versions v
+    WHERE u.pricing_version_id IS NOT NULL
+      AND u.pricing_version_id !~ '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+      AND v.provider = u.provider_id
+      AND v.category = u.category
+      AND v.version::text = u.pricing_version_id
+  `)
+  await pool.query(`
+    UPDATE ai_usage_logs SET pricing_version_id = NULL
+    WHERE pricing_version_id IS NOT NULL
+      AND pricing_version_id !~ '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+  `)
+  await pool.query(`
+    DO $$
+    BEGIN
+      ALTER TABLE ai_usage_logs ADD CONSTRAINT fk_ai_usage_pricing_version
+        FOREIGN KEY (pricing_version_id) REFERENCES ai_provider_cost_versions(id);
+    EXCEPTION WHEN duplicate_object THEN NULL;
+    END $$;
+  `)
+
   // Backfill: users that already own a package (bought before the lifecycle feature) get
   // an active status and a fresh expiry based on the package billing period.
   await pool.query(`
@@ -408,11 +534,49 @@ export async function initStore(): Promise<void> {
     END $$;
   `)
 
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS notifications (
+      id TEXT PRIMARY KEY,
+      target_type TEXT NOT NULL DEFAULT 'admin',
+      target_phone TEXT,
+      category TEXT NOT NULL DEFAULT 'system',
+      title TEXT NOT NULL,
+      body TEXT NOT NULL,
+      data JSONB NOT NULL DEFAULT '{}',
+      is_read BOOLEAN NOT NULL DEFAULT false,
+      created_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_notifications_target ON notifications(target_type, target_phone);
+    CREATE INDEX IF NOT EXISTS idx_notifications_read ON notifications(is_read);
+    CREATE INDEX IF NOT EXISTS idx_notifications_created ON notifications(created_at);
+  `)
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS error_logs (
+      id TEXT PRIMARY KEY,
+      source TEXT NOT NULL DEFAULT 'app',
+      message TEXT NOT NULL,
+      stack TEXT,
+      details JSONB NOT NULL DEFAULT '{}',
+      created_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_error_logs_created ON error_logs(created_at);
+    CREATE INDEX IF NOT EXISTS idx_error_logs_source ON error_logs(source);
+  `)
+  await pool.query(`ALTER TABLE error_logs ADD COLUMN IF NOT EXISTS resolved BOOLEAN NOT NULL DEFAULT false`)
+  await pool.query(`ALTER TABLE error_logs ADD COLUMN IF NOT EXISTS resolved_at TEXT`)
+  await pool.query(`ALTER TABLE error_logs ADD COLUMN IF NOT EXISTS last_seen_at TEXT`)
+  await pool.query(`UPDATE error_logs SET last_seen_at = created_at WHERE last_seen_at IS NULL`)
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_error_logs_resolved ON error_logs(resolved)`)
+
   await seedDefaultPackages()
   await seedDefaultTopUpBundles()
   await migratePackageFeatures()
 
   await seedDefaultAIProviders()
+  await seedDefaultAICosts()
+  // Ensure every seeded/legacy cost row has an active v1 pricing version.
+  await syncAICostVersionsFromCosts()
   await migrateMetaConfigFromEnv()
 
   const legacyFile = path.join(process.cwd(), 'data', 'posts.json')
@@ -488,6 +652,9 @@ export async function updatePost(id: string, patch: Partial<Post>): Promise<Post
   await getDb().update(posts).set({
     stage: row.stage,
     updatedAt: row.updatedAt,
+    tokensCharged: row.tokensCharged ?? 0,
+    tokensChargedAction: row.tokensChargedAction ?? null,
+    refundedAt: row.refundedAt ?? null,
     data: row.data,
   }).where(eq(posts.id, id))
   return updated
@@ -618,9 +785,13 @@ export async function getUserPreferences(phone: string): Promise<UserPreferences
   const result = await getDb().select().from(userPreferences).where(eq(userPreferences.phone, phone)).limit(1)
   if (result.length === 0) return undefined
   try {
-    return result[0].data as UserPreferences
+    const prefs = result[0].data as UserPreferences
+    return {
+      ...prefs,
+      brandingEnabled: prefs.brandingEnabled ?? true,
+    }
   } catch {
-    return undefined
+    return { brandingEnabled: true }
   }
 }
 
@@ -1118,6 +1289,17 @@ export async function disconnectAccount(id: string): Promise<void> {
   await getDb().update(socialAccounts).set({ status: 'disconnected' }).where(eq(socialAccounts.id, id))
 }
 
+export async function updateSocialAccount(id: string, patch: Partial<{ accessToken: string; refreshToken: string; tokenExpiresAt: string; status: 'active' | 'expired' | 'disconnected' }>): Promise<void> {
+  const updateData: Record<string, unknown> = {}
+  if (patch.accessToken !== undefined) updateData.accessToken = await import('./lib/crypto.js').then(m => m.encryptSecret(patch.accessToken!))
+  if (patch.refreshToken !== undefined) updateData.refreshToken = await import('./lib/crypto.js').then(m => m.encryptSecret(patch.refreshToken!))
+  if (patch.tokenExpiresAt !== undefined) updateData.tokenExpiresAt = patch.tokenExpiresAt
+  if (patch.status !== undefined) updateData.status = patch.status
+  if (Object.keys(updateData).length > 0) {
+    await getDb().update(socialAccounts).set(updateData).where(eq(socialAccounts.id, id))
+  }
+}
+
 // Resolve a WhatsApp sender number (webhook `from`) to the user's canonical phone.
 // A real number is stored as `social_accounts.accountId` (platform=whatsapp) for the
 // user whose canonical phone is `social_accounts.phone`. Users whose canonical phone IS
@@ -1243,6 +1425,58 @@ export async function getPayment(id: string): Promise<Payment | undefined> {
 export async function getPaymentByStripeSession(sessionId: string): Promise<Payment | undefined> {
   const result = await getDb().select().from(payments).where(eq(payments.stripeSessionId, sessionId)).limit(1)
   if (result.length === 0) return undefined
+  return paymentFromRow(result[0])
+}
+
+/**
+ * Atomically claims a pending payment by id, transitioning it to 'processing'.
+ * Returns the claimed payment, or undefined if no pending payment exists.
+ */
+export async function claimPayment(id: string): Promise<Payment | undefined> {
+  const result = await getDb()
+    .update(payments)
+    .set({ status: 'processing' })
+    .where(sql`${payments.id} = ${id} AND ${payments.status} = 'pending'`)
+    .returning()
+  if (result.length === 0) return undefined
+  return paymentFromRow(result[0])
+}
+
+/**
+ * Atomically claims a pending payment by stripe_session_id, transitioning it to
+ * 'processing'. Returns the claimed payment, or undefined if no pending payment
+ * exists for that session (already completed, already being processed, or not found).
+ * This is the single idempotency gate for concurrent webhook deliveries.
+ */
+export async function claimPaymentByStripeSession(sessionId: string): Promise<Payment | undefined> {
+  const result = await getDb()
+    .update(payments)
+    .set({ status: 'processing' })
+    .where(sql`${payments.stripeSessionId} = ${sessionId} AND ${payments.status} = 'pending'`)
+    .returning()
+  if (result.length === 0) return undefined
+  return paymentFromRow(result[0])
+}
+
+/** Marks a claimed (processing) payment as completed. */
+export async function completePayment(id: string): Promise<Payment> {
+  const result = await getDb()
+    .update(payments)
+    .set({ status: 'completed' })
+    .where(eq(payments.id, id))
+    .returning()
+  if (result.length === 0) throw new Error(`Payment ${id} not found`)
+  return paymentFromRow(result[0])
+}
+
+/** Marks a claimed (processing) payment as failed. */
+export async function failPayment(id: string): Promise<Payment> {
+  const result = await getDb()
+    .update(payments)
+    .set({ status: 'failed' })
+    .where(eq(payments.id, id))
+    .returning()
+  if (result.length === 0) throw new Error(`Payment ${id} not found`)
   return paymentFromRow(result[0])
 }
 
@@ -1441,6 +1675,214 @@ export async function countAuditLogs(opts: { actorType?: string; actor?: string;
   return result[0]?.count ?? 0
 }
 
+// ---- Notifications ----
+
+export interface AppNotification {
+  id: string
+  targetType: 'admin' | 'user'
+  targetPhone?: string
+  category: string
+  title: string
+  body: string
+  data: Record<string, unknown>
+  isRead: boolean
+  createdAt: string
+}
+
+function notificationFromRow(row: typeof notifications.$inferSelect): AppNotification {
+  return {
+    id: row.id,
+    targetType: row.targetType as 'admin' | 'user',
+    targetPhone: row.targetPhone || undefined,
+    category: row.category,
+    title: row.title,
+    body: row.body,
+    data: (row.data ?? {}) as Record<string, unknown>,
+    isRead: row.isRead,
+    createdAt: row.createdAt,
+  }
+}
+
+export async function createNotification(input: {
+  targetType: 'admin' | 'user'
+  targetPhone?: string
+  category: string
+  title: string
+  body: string
+  data?: Record<string, unknown>
+}): Promise<AppNotification> {
+  const now = new Date().toISOString()
+  const row = {
+    id: randomUUID(),
+    targetType: input.targetType,
+    targetPhone: input.targetPhone || null,
+    category: input.category,
+    title: input.title,
+    body: input.body,
+    data: (input.data ?? {}) as Record<string, unknown>,
+    isRead: false,
+    createdAt: now,
+  }
+  await getDb().insert(notifications).values(row)
+  return notificationFromRow(row as typeof notifications.$inferSelect)
+}
+
+export async function listNotifications(opts: {
+  targetType?: 'admin' | 'user'
+  targetPhone?: string
+  unreadOnly?: boolean
+  limit?: number
+} = {}): Promise<AppNotification[]> {
+  const limit = opts.limit ?? 50
+  const conditions = []
+  if (opts.targetType) conditions.push(eq(notifications.targetType, opts.targetType))
+  if (opts.targetPhone) conditions.push(eq(notifications.targetPhone, await resolveUserPhone(opts.targetPhone)))
+  if (opts.unreadOnly) conditions.push(eq(notifications.isRead, false))
+  const q = getDb().select().from(notifications)
+  if (conditions.length === 1) q.where(conditions[0])
+  if (conditions.length > 1) q.where(and(...conditions))
+  const result = await q.orderBy(desc(notifications.createdAt)).limit(limit)
+  return result.map(notificationFromRow)
+}
+
+export async function countUnreadNotifications(opts: { targetType?: 'admin' | 'user'; targetPhone?: string } = {}): Promise<number> {
+  const conditions = [eq(notifications.isRead, false)]
+  if (opts.targetType) conditions.push(eq(notifications.targetType, opts.targetType))
+  if (opts.targetPhone) conditions.push(eq(notifications.targetPhone, await resolveUserPhone(opts.targetPhone)))
+  const result = await getDb().select({ count: sql<number>`count(*)::int` }).from(notifications)
+    .where(conditions.length === 1 ? conditions[0] : and(...conditions))
+  return result[0]?.count ?? 0
+}
+
+export async function markNotificationRead(id: string, opts: { targetType?: 'admin' | 'user'; targetPhone?: string } = {}): Promise<boolean> {
+  const conditions = [eq(notifications.id, id)]
+  if (opts.targetType) conditions.push(eq(notifications.targetType, opts.targetType))
+  if (opts.targetPhone) conditions.push(eq(notifications.targetPhone, await resolveUserPhone(opts.targetPhone)))
+  const rows = await getDb().update(notifications)
+    .set({ isRead: true })
+    .where(conditions.length === 1 ? conditions[0] : and(...conditions))
+    .returning()
+  return rows.length > 0
+}
+
+export async function markAllNotificationsRead(opts: { targetType?: 'admin' | 'user'; targetPhone?: string } = {}): Promise<void> {
+  const conditions = [eq(notifications.isRead, false)]
+  if (opts.targetType) conditions.push(eq(notifications.targetType, opts.targetType))
+  if (opts.targetPhone) conditions.push(eq(notifications.targetPhone, await resolveUserPhone(opts.targetPhone)))
+  await getDb().update(notifications)
+    .set({ isRead: true })
+    .where(conditions.length === 1 ? conditions[0] : and(...conditions))
+}
+
+// ---- Error Logs ----
+
+export interface ErrorLogRecord {
+  id: string
+  source: string
+  message: string
+  stack?: string
+  details: Record<string, unknown>
+  resolved: boolean
+  resolvedAt?: string
+  lastSeenAt: string
+  createdAt: string
+}
+
+function errorLogFromRow(row: typeof errorLogs.$inferSelect): ErrorLogRecord {
+  return {
+    id: row.id,
+    source: row.source,
+    message: row.message,
+    stack: row.stack || undefined,
+    details: (row.details ?? {}) as Record<string, unknown>,
+    resolved: row.resolved,
+    resolvedAt: row.resolvedAt || undefined,
+    lastSeenAt: row.lastSeenAt,
+    createdAt: row.createdAt,
+  }
+}
+
+export async function createErrorLog(input: {
+  source?: string
+  message: string
+  stack?: string
+  details?: Record<string, unknown>
+}): Promise<ErrorLogRecord> {
+  const now = new Date().toISOString()
+  const source = input.source || 'app'
+
+  // Dedupe: if the same source+message exists, refresh lastSeenAt and keep it open
+  const existing = await getDb().select({ id: errorLogs.id, resolved: errorLogs.resolved })
+    .from(errorLogs)
+    .where(and(eq(errorLogs.source, source), eq(errorLogs.message, input.message)))
+    .limit(1)
+
+  if (existing.length > 0) {
+    const updated = await getDb().update(errorLogs)
+      .set({ lastSeenAt: now })
+      .where(eq(errorLogs.id, existing[0].id))
+      .returning()
+    return errorLogFromRow(updated[0])
+  }
+
+  const row = {
+    id: randomUUID(),
+    source,
+    message: input.message,
+    stack: input.stack || null,
+    details: (input.details ?? {}) as Record<string, unknown>,
+    resolved: false,
+    resolvedAt: null,
+    lastSeenAt: now,
+    createdAt: now,
+  }
+  await getDb().insert(errorLogs).values(row)
+  return errorLogFromRow(row as typeof errorLogs.$inferSelect)
+}
+
+export async function listErrorLogs(opts: { source?: string; resolved?: boolean; limit?: number; offset?: number } = {}): Promise<ErrorLogRecord[]> {
+  const limit = opts.limit ?? 50
+  const offset = opts.offset ?? 0
+  const conditions = []
+  if (opts.source) conditions.push(eq(errorLogs.source, opts.source))
+  if (opts.resolved !== undefined) conditions.push(eq(errorLogs.resolved, opts.resolved))
+  const q = getDb().select().from(errorLogs)
+  if (conditions.length === 1) q.where(conditions[0])
+  if (conditions.length > 1) q.where(and(...conditions))
+  const result = await q.orderBy(desc(errorLogs.createdAt)).limit(limit).offset(offset)
+  return result.map(errorLogFromRow)
+}
+
+export async function countErrorLogs(opts: { resolved?: boolean } = {}): Promise<number> {
+  const q = getDb().select({ count: sql<number>`count(*)::int` }).from(errorLogs)
+  if (opts.resolved !== undefined) q.where(eq(errorLogs.resolved, opts.resolved))
+  const result = await q
+  return result[0]?.count ?? 0
+}
+
+export async function markErrorLogResolved(id: string, resolved: boolean): Promise<ErrorLogRecord | undefined> {
+  const now = new Date().toISOString()
+  const result = await getDb().update(errorLogs)
+    .set({ resolved, resolvedAt: resolved ? now : null })
+    .where(eq(errorLogs.id, id))
+    .returning()
+  return result.length > 0 ? errorLogFromRow(result[0]) : undefined
+}
+
+// Auto-resolve errors that have not recurred within the threshold (default 24h).
+export async function autoResolveErrorLogs(thresholdMs = 24 * 60 * 60 * 1000): Promise<number> {
+  const cutoff = new Date(Date.now() - thresholdMs).toISOString()
+  const result = await getDb().update(errorLogs)
+    .set({ resolved: true, resolvedAt: new Date().toISOString() })
+    .where(and(eq(errorLogs.resolved, false), sql`${errorLogs.lastSeenAt} < ${cutoff}`))
+    .returning({ id: errorLogs.id })
+  return result.length
+}
+
+export async function clearErrorLogs(): Promise<void> {
+  await getDb().delete(errorLogs)
+}
+
 // ---- Package Seeding ----
 
 interface SeedPackage {
@@ -1457,10 +1899,10 @@ interface SeedPackage {
 }
 
 const DEFAULT_PACKAGES: SeedPackage[] = [
-  { name: 'Facebook Only', slug: 'facebook-only', description: 'Perfect for Facebook-only creators', priceCents: 500, includedTokens: 15, sortOrder: 0, billingPeriod: 'monthly', yearlyPriceCents: 0, setupType: 'none', features: { facebook_publishing: true, instagram_publishing: false, whatsapp_broadcast: false, web_chat: false, voice_transcription: true, scheduled_publishing: false, analytics_dashboard: false, priority_support: false, ad_campaigns: false, custom_branding: false } },
-  { name: 'Starter', slug: 'starter', description: 'Get started with social media automation', priceCents: 1500, includedTokens: 100, sortOrder: 1, billingPeriod: 'monthly', yearlyPriceCents: 0, setupType: 'none', features: { facebook_publishing: true, instagram_publishing: true, whatsapp_broadcast: false, web_chat: false, voice_transcription: true, scheduled_publishing: false, analytics_dashboard: true, priority_support: false, ad_campaigns: false, custom_branding: false } },
-  { name: 'Pro', slug: 'pro', description: 'For professional content creators', priceCents: 2900, includedTokens: 1000, sortOrder: 2, billingPeriod: 'monthly', yearlyPriceCents: 0, setupType: 'none', features: { facebook_publishing: true, instagram_publishing: true, whatsapp_broadcast: true, web_chat: true, voice_transcription: true, scheduled_publishing: true, analytics_dashboard: true, priority_support: true, ad_campaigns: true, custom_branding: false } },
-  { name: 'Exclusive', slug: 'exclusive', description: 'Full access to all features', priceCents: 9900, includedTokens: 3000, sortOrder: 3, billingPeriod: 'monthly', yearlyPriceCents: 0, setupType: 'none', features: { facebook_publishing: true, instagram_publishing: true, whatsapp_broadcast: true, web_chat: true, voice_transcription: true, scheduled_publishing: true, analytics_dashboard: true, priority_support: true, ad_campaigns: true, custom_branding: true } },
+  { name: 'Facebook Only', slug: 'facebook-only', description: 'Perfect for Facebook-only creators', priceCents: 500, includedTokens: 15, sortOrder: 0, billingPeriod: 'monthly', yearlyPriceCents: 0, setupType: 'none', features: { facebook_publishing: true, instagram_publishing: false, whatsapp_broadcast: false, web_chat: true, voice_transcription: true, scheduled_publishing: true, analytics_dashboard: false, priority_support: false, ad_campaigns: true, custom_branding: false, image_generation: true } },
+  { name: 'Starter', slug: 'starter', description: 'Get started with social media automation', priceCents: 1500, includedTokens: 100, sortOrder: 1, billingPeriod: 'monthly', yearlyPriceCents: 0, setupType: 'none', features: { facebook_publishing: true, instagram_publishing: true, whatsapp_broadcast: false, web_chat: true, voice_transcription: true, scheduled_publishing: true, analytics_dashboard: true, priority_support: false, ad_campaigns: true, custom_branding: false, image_generation: true } },
+  { name: 'Pro', slug: 'pro', description: 'For professional content creators', priceCents: 2900, includedTokens: 1000, sortOrder: 2, billingPeriod: 'monthly', yearlyPriceCents: 0, setupType: 'none', features: { facebook_publishing: true, instagram_publishing: true, whatsapp_broadcast: true, web_chat: true, voice_transcription: true, scheduled_publishing: true, analytics_dashboard: true, priority_support: true, ad_campaigns: true, custom_branding: true, image_generation: true } },
+  { name: 'Exclusive', slug: 'exclusive', description: 'Full access to all features', priceCents: 9900, includedTokens: 3000, sortOrder: 3, billingPeriod: 'monthly', yearlyPriceCents: 0, setupType: 'none', features: { facebook_publishing: true, instagram_publishing: true, whatsapp_broadcast: true, web_chat: true, voice_transcription: true, scheduled_publishing: true, analytics_dashboard: true, priority_support: true, ad_campaigns: true, custom_branding: true, image_generation: true } },
 ]
 
 const CANONICAL_FEATURE_KEYS = [
@@ -1474,11 +1916,17 @@ const CANONICAL_FEATURE_KEYS = [
   'priority_support',
   'ad_campaigns',
   'custom_branding',
+  'image_generation',
 ]
 
 const LEGACY_FEATURE_MAP: Record<string, string> = {
   whatsapp_broadcasts: 'whatsapp_broadcast',
 }
+
+// Scheduling token costs
+export const SCHEDULE_POST_COST = 1
+export const SCHEDULE_AD_COST = 3
+export const EDIT_SCHEDULED_COST = 1
 
 async function seedDefaultPackages(): Promise<void> {
   const now = new Date().toISOString()
@@ -1521,7 +1969,7 @@ async function seedDefaultPackages(): Promise<void> {
  */
 async function migratePackageFeatures(): Promise<void> {
   const marker = await getConfig('package_features_migration')
-  if (marker === 'v1') return
+  if (marker === 'v3') return
 
   const defaultsBySlug = new Map(DEFAULT_PACKAGES.map((p) => [p.slug, p.features]))
   const rows = await getDb().select().from(packages)
@@ -1560,7 +2008,7 @@ async function migratePackageFeatures(): Promise<void> {
   if (updated > 0) {
     logger.info({ updated }, 'migrated package features to canonical keys')
   }
-  await setConfig('package_features_migration', 'v1')
+  await setConfig('package_features_migration', 'v3')
 }
 
 // ---- AI Provider Seeding (from env vars) ----
@@ -1611,7 +2059,11 @@ async function seedDefaultAIProviders(): Promise<void> {
     })
   }
 
-  // OpenAI Image
+  // Image providers — seed whichever keys are present; only the provider
+  // selected via IMAGE_PROVIDER becomes the active/default one.
+  const imageProvider = (process.env.IMAGE_PROVIDER || 'openai')
+  const imageModel = process.env.IMAGE_MODEL || 'gpt-image-1-mini'
+
   const openaiKey = process.env.OPENAI_API_KEY || ''
   if (openaiKey) {
     defaults.push({
@@ -1620,10 +2072,40 @@ async function seedDefaultAIProviders(): Promise<void> {
       displayName: 'OpenAI GPT Image',
       apiKey: openaiKey,
       baseUrl: 'https://api.openai.com/v1',
-      model: process.env.IMAGE_MODEL || 'gpt-image-1-mini',
+      model: imageProvider === 'openai' ? imageModel : 'gpt-image-1-mini',
       config: {},
-      isActive: true,
-      isDefault: true,
+      isActive: imageProvider === 'openai',
+      isDefault: imageProvider === 'openai',
+    })
+  }
+
+  const geminiKey = process.env.GEMINI_API_KEY || ''
+  if (geminiKey) {
+    defaults.push({
+      category: 'image',
+      provider: 'gemini',
+      displayName: 'Gemini',
+      apiKey: geminiKey,
+      baseUrl: 'https://generativelanguage.googleapis.com/v1beta',
+      model: process.env.GEMINI_IMAGE_MODEL || 'gemini-2.0-flash-preview-image-generation',
+      config: {},
+      isActive: imageProvider === 'gemini',
+      isDefault: imageProvider === 'gemini',
+    })
+  }
+
+  const stabilityKey = process.env.STABILITY_API_KEY || ''
+  if (stabilityKey) {
+    defaults.push({
+      category: 'image',
+      provider: 'stability',
+      displayName: 'Stability AI',
+      apiKey: stabilityKey,
+      baseUrl: 'https://api.stability.ai/v2beta',
+      model: process.env.STABILITY_IMAGE_MODEL || 'stable-image-core',
+      config: {},
+      isActive: imageProvider === 'stability',
+      isDefault: imageProvider === 'stability',
     })
   }
 
@@ -1649,6 +2131,77 @@ async function seedDefaultAIProviders(): Promise<void> {
   }
 }
 
+/**
+ * Seeds approximate cost-per-token rates for common providers so the cost
+ * dashboard shows real $ figures out-of-the-box.  Rates are in cents and
+ * can be edited by the admin via the AI Providers → Cost Configuration UI.
+ */
+async function seedDefaultAICosts(): Promise<void> {
+  const now = new Date().toISOString()
+  const defaults: { provider: string; category: AIProviderCategory; costPer1MInputTokens: number; costPer1MOutputTokens: number; costPerImage: number; costPerAudioMinute: number }[] = [
+    // LLM (cents per 1M tokens)
+    { provider: 'deepseek',   category: 'llm', costPer1MInputTokens: 27,  costPer1MOutputTokens: 110,  costPerImage: 0, costPerAudioMinute: 0 },
+    { provider: 'mistral',    category: 'llm', costPer1MInputTokens: 200, costPer1MOutputTokens: 600,  costPerImage: 0, costPerAudioMinute: 0 },
+    { provider: 'openai',     category: 'llm', costPer1MInputTokens: 250, costPer1MOutputTokens: 1000, costPerImage: 0, costPerAudioMinute: 0 },
+    { provider: 'anthropic',  category: 'llm', costPer1MInputTokens: 300, costPer1MOutputTokens: 1500, costPerImage: 0, costPerAudioMinute: 0 },
+    // STT (cents per minute of audio)
+    { provider: 'groq',       category: 'stt', costPer1MInputTokens: 0,   costPer1MOutputTokens: 0,    costPerImage: 0, costPerAudioMinute: 0 },
+    { provider: 'openai-stt', category: 'stt', costPer1MInputTokens: 0,   costPer1MOutputTokens: 0,    costPerImage: 0, costPerAudioMinute: 1 },
+    // Image (cents per image)
+    { provider: 'openai',     category: 'image', costPer1MInputTokens: 0,  costPer1MOutputTokens: 0,   costPerImage: 1, costPerAudioMinute: 0 },
+    { provider: 'gemini',     category: 'image', costPer1MInputTokens: 0,  costPer1MOutputTokens: 0,   costPerImage: 4,   costPerAudioMinute: 0 },
+    { provider: 'stability',  category: 'image', costPer1MInputTokens: 0,  costPer1MOutputTokens: 0,   costPerImage: 4,   costPerAudioMinute: 0 },
+  ]
+
+  for (const d of defaults) {
+    const existing = await getDb()
+      .select({ id: aiProviderCosts.id })
+      .from(aiProviderCosts)
+      .where(and(eq(aiProviderCosts.provider, d.provider), eq(aiProviderCosts.category, d.category)))
+      .limit(1)
+    if (existing.length > 0) continue
+    await getDb().insert(aiProviderCosts).values({
+      id: randomUUID(),
+      provider: d.provider,
+      category: d.category,
+      costPer1MInputTokens: d.costPer1MInputTokens,
+      costPer1MOutputTokens: d.costPer1MOutputTokens,
+      costPerImage: d.costPerImage,
+      costPerAudioMinute: d.costPerAudioMinute,
+      updatedAt: now,
+    })
+  }
+
+  logger.info({ count: defaults.length }, 'seeded default AI cost rates')
+}
+
+async function syncAICostVersionsFromCosts(): Promise<void> {
+  const pool = getPool()
+  await pool.query(`
+    INSERT INTO ai_provider_cost_versions (id, provider, category, version, input_rate, output_rate, cached_input_rate, image_rate, audio_rate, effective_from, source, active, status, created_at, updated_at)
+    SELECT
+      c.id || '-v1' AS id,
+      c.provider,
+      c.category,
+      1 AS version,
+      c.cost_per_1m_input_tokens AS input_rate,
+      c.cost_per_1m_output_tokens AS output_rate,
+      0 AS cached_input_rate,
+      c.cost_per_image AS image_rate,
+      c.cost_per_audio_minute AS audio_rate,
+      c.updated_at AS effective_from,
+      'seed' AS source,
+      true AS active,
+      'approved' AS status,
+      c.updated_at AS created_at,
+      c.updated_at AS updated_at
+    FROM ai_provider_costs c
+    WHERE NOT EXISTS (
+      SELECT 1 FROM ai_provider_cost_versions v WHERE v.provider = c.provider AND v.category = c.category
+    )
+  `)
+}
+
 // ---- Reset Store ----
 
 export async function resetStore(): Promise<void> {
@@ -1668,6 +2221,7 @@ export async function resetStore(): Promise<void> {
   await pool.query('DELETE FROM user_sessions')
   await pool.query('DELETE FROM ai_usage_logs')
   await pool.query('DELETE FROM ai_provider_costs')
+  await pool.query('DELETE FROM ai_provider_cost_versions')
   await pool.query('DELETE FROM ai_providers')
   await pool.query('DELETE FROM meta_config')
   await pool.query('DELETE FROM support_tickets')
@@ -1698,11 +2252,11 @@ export async function recoverStuckPosts(): Promise<number> {
       // This prevents a double charge when the user re-approves after recovery.
       const chargedAction = post.tokensChargedAction as 'standard_post' | 'cross_platform' | undefined
       const chargedAmount = post.tokensCharged
-      if (chargedAction && chargedAmount && chargedAmount > 0) {
+      if (chargedAction && chargedAmount && chargedAmount > 0 && !post.refundedAt) {
         try {
           const { tokenEngine } = await import('./lib/TokenEngine.js')
           const userPhone = await resolveUserPhone(post.phone)
-          await tokenEngine.refund(chargedAction, userPhone, `Refund after stuck-post recovery: ${post.id}`)
+          await tokenEngine.refundPost(post.id, userPhone, `Refund after stuck-post recovery: ${post.id}`)
         } catch (err) {
           logger.warn({ postId: post.id, error: (err as Error).message }, 'failed to refund tokens during stuck-post recovery')
         }
@@ -1714,8 +2268,6 @@ export async function recoverStuckPosts(): Promise<number> {
       await updatePost(post.id, {
         status: 'AWAITING_APPROVAL',
         history,
-        tokensCharged: undefined,
-        tokensChargedAction: undefined,
       })
       await setConversation(post.phone, { kind: 'awaiting_approval', postId: post.id })
       recovered++
@@ -1740,9 +2292,14 @@ function adCampaignFromRow(row: typeof adCampaigns.$inferSelect): AdCampaign {
     adContent: row.adContent as AdCampaign['adContent'],
     targeting: row.targeting as AdCampaign['targeting'],
     budgetCents: row.budgetCents,
+    budgetType: (row.budgetType as AdCampaign['budgetType']) || 'daily',
+    currency: row.currency || 'USD',
+    startDate: row.startDate || undefined,
+    endDate: row.endDate || undefined,
     campaignId: row.campaignId || undefined,
     adSetId: row.adSetId || undefined,
     adId: row.adId || undefined,
+    creativeId: row.creativeId || undefined,
     imageUrl: row.imageUrl || undefined,
     publishAt: row.publishAt || undefined,
     createdAt: row.createdAt,
@@ -1758,6 +2315,10 @@ export async function createAdCampaign(data: {
   adContent: AdCampaign['adContent']
   targeting: AdCampaign['targeting']
   budgetCents: number
+  budgetType: 'daily' | 'total'
+  currency: string
+  startDate?: string
+  endDate?: string
   imageUrl?: string
   publishAt?: string
 }): Promise<AdCampaign> {
@@ -1772,6 +2333,10 @@ export async function createAdCampaign(data: {
     adContent: data.adContent,
     targeting: data.targeting,
     budgetCents: data.budgetCents,
+    budgetType: data.budgetType,
+    currency: data.currency,
+    startDate: data.startDate,
+    endDate: data.endDate,
     imageUrl: data.imageUrl,
     publishAt: data.publishAt,
     createdAt: now,
@@ -1787,6 +2352,10 @@ export async function createAdCampaign(data: {
     adContent: campaign.adContent as unknown as Record<string, unknown>,
     targeting: campaign.targeting as unknown as Record<string, unknown>,
     budgetCents: campaign.budgetCents,
+    budgetType: campaign.budgetType,
+    currency: campaign.currency,
+    startDate: campaign.startDate || null,
+    endDate: campaign.endDate || null,
     imageUrl: campaign.imageUrl || null,
     publishAt: campaign.publishAt || null,
     createdAt: campaign.createdAt,
@@ -1797,6 +2366,15 @@ export async function createAdCampaign(data: {
 
 export async function getAdCampaign(id: string): Promise<AdCampaign | undefined> {
   const result = await getDb().select().from(adCampaigns).where(eq(adCampaigns.id, id)).limit(1)
+  if (result.length === 0) return undefined
+  return adCampaignFromRow(result[0])
+}
+
+export async function getAdCampaignByPhone(id: string, phone: string): Promise<AdCampaign | undefined> {
+  const userPhone = await resolveUserPhone(phone)
+  const result = await getDb().select().from(adCampaigns)
+    .where(and(eq(adCampaigns.id, id), eq(adCampaigns.phone, userPhone)))
+    .limit(1)
   if (result.length === 0) return undefined
   return adCampaignFromRow(result[0])
 }
@@ -1822,7 +2400,10 @@ export async function listScheduledAdCampaigns(phone: string): Promise<AdCampaig
       eq(adCampaigns.phone, userPhone),
       sql`${adCampaigns.status} IN ('scheduled', 'creating')`,
     ))
-    .orderBy(desc(adCampaigns.createdAt))
+    .orderBy(
+      sql`${adCampaigns.publishAt} IS NULL ASC`,
+      asc(adCampaigns.publishAt),
+    )
   return result.map(adCampaignFromRow)
 }
 
@@ -1835,31 +2416,95 @@ export async function cancelScheduledAdCampaign(id: string, phone: string): Prom
   return rows.length > 0
 }
 
-export async function updateAdCampaign(id: string, patch: Partial<AdCampaign>): Promise<AdCampaign> {
-  const existing = await getAdCampaign(id)
+export async function cancelAdCampaign(id: string, phone: string): Promise<boolean> {
+  const userPhone = await resolveUserPhone(phone)
+  const current = await getDb().select({ status: adCampaigns.status })
+    .from(adCampaigns).where(and(eq(adCampaigns.id, id), eq(adCampaigns.phone, userPhone))).limit(1)
+  if (current.length === 0) return false
+  const status = current[0].status
+  const allowed = ['scheduled', 'creating', 'paused', 'active']
+  if (!status || !allowed.includes(status)) return false
+  const rows = await getDb().update(adCampaigns)
+    .set({ status: 'cancelled', updatedAt: new Date().toISOString() })
+    .where(and(eq(adCampaigns.id, id), eq(adCampaigns.phone, userPhone), eq(adCampaigns.status, status)))
+    .returning()
+  return rows.length > 0
+}
+
+export type AdCampaignAction = 'pause' | 'resume' | 'stop'
+export async function mutateAdCampaignStatus(id: string, phone: string, action: AdCampaignAction): Promise<boolean> {
+  const userPhone = await resolveUserPhone(phone)
+  const current = await getDb().select({ status: adCampaigns.status })
+    .from(adCampaigns).where(and(eq(adCampaigns.id, id), eq(adCampaigns.phone, userPhone))).limit(1)
+  if (current.length === 0) return false
+  const status = current[0].status
+  let next: AdCampaign['status'] | null = null
+  if (action === 'pause' && status === 'active') next = 'paused'
+  if (action === 'resume' && status === 'paused') next = 'active'
+  if (action === 'stop' && (status === 'active' || status === 'paused')) next = 'stopped'
+  if (!next) return false
+  const rows = await getDb().update(adCampaigns)
+    .set({ status: next, updatedAt: new Date().toISOString() })
+    .where(and(eq(adCampaigns.id, id), eq(adCampaigns.phone, userPhone), eq(adCampaigns.status, status)))
+    .returning()
+  return rows.length > 0
+}
+
+export async function updateAdCampaign(
+  id: string,
+  patch: Partial<AdCampaign>,
+  options?: { phone?: string },
+): Promise<AdCampaign> {
+  const existing = options?.phone
+    ? await getAdCampaignByPhone(id, options.phone)
+    : await getAdCampaign(id)
   if (!existing) throw new Error(`Ad campaign ${id} not found`)
   const updated: AdCampaign = { ...existing, ...patch, updatedAt: new Date().toISOString() }
-  await getDb().update(adCampaigns).set({
+  const patchObj: Record<string, unknown> = {
+    name: updated.name,
+    objective: updated.objective,
     status: updated.status,
+    adContent: updated.adContent as unknown as Record<string, unknown>,
+    targeting: updated.targeting as unknown as Record<string, unknown>,
+    budgetCents: updated.budgetCents,
+    budgetType: updated.budgetType,
+    currency: updated.currency,
+    startDate: updated.startDate || null,
+    endDate: updated.endDate || null,
     campaignId: updated.campaignId || null,
     adSetId: updated.adSetId || null,
     adId: updated.adId || null,
+    creativeId: updated.creativeId || null,
     imageUrl: updated.imageUrl || null,
     publishAt: updated.publishAt || null,
     updatedAt: updated.updatedAt,
-  }).where(eq(adCampaigns.id, id))
+  }
+  const where = options?.phone
+    ? and(eq(adCampaigns.id, id), eq(adCampaigns.phone, await resolveUserPhone(options.phone)))
+    : eq(adCampaigns.id, id)
+  await getDb().update(adCampaigns).set(patchObj).where(where as any)
   return updated
+}
+
+export async function setAdCampaignStatus(id: string, phone: string, status: AdCampaign['status']): Promise<boolean> {
+  const userPhone = await resolveUserPhone(phone)
+  const rows = await getDb().update(adCampaigns)
+    .set({ status, updatedAt: new Date().toISOString() })
+    .where(and(eq(adCampaigns.id, id), eq(adCampaigns.phone, userPhone)))
+    .returning()
+  return rows.length > 0
 }
 
 // ---- AI Provider CRUD ----
 
-function aiProviderFromRow(row: typeof aiProviders.$inferSelect): AIProvider {
+async function aiProviderFromRow(row: typeof aiProviders.$inferSelect): Promise<AIProvider> {
+  const apiKey = row.apiKey ? await decryptSecret(row.apiKey) : ''
   return {
     id: row.id,
     category: row.category as AIProviderCategory,
     provider: row.provider,
     displayName: row.displayName,
-    apiKey: row.apiKey || '',
+    apiKey,
     baseUrl: row.baseUrl || '',
     model: row.model || '',
     config: (row.config ?? {}) as Record<string, unknown>,
@@ -1870,15 +2515,56 @@ function aiProviderFromRow(row: typeof aiProviders.$inferSelect): AIProvider {
   }
 }
 
-export async function createAIProvider(data: AIProviderInput): Promise<AIProvider> {
+export async function validateProviderConnection(provider: string, category: AIProviderCategory, apiKey: string, baseUrl: string, model: string): Promise<{ ok: boolean; message: string; latencyMs: number }> {
+  if (!apiKey) {
+    return { ok: false, message: 'No API key configured', latencyMs: 0 }
+  }
+  try {
+    const { groqSTT } = await import('./lib/ai/providers/groq.js')
+    const { openaiSTT } = await import('./lib/ai/providers/openai-stt.js')
+    const { deepseekLLM } = await import('./lib/ai/providers/deepseek.js')
+    const { mistralLLM } = await import('./lib/ai/providers/mistral.js')
+    const { openaiLLM } = await import('./lib/ai/providers/openai-llm.js')
+    const { anthropicLLM } = await import('./lib/ai/providers/anthropic.js')
+    const { openaiImage } = await import('./lib/ai/providers/openai-image.js')
+    const { geminiImage } = await import('./lib/ai/providers/gemini.js')
+    const { stabilityImage } = await import('./lib/ai/providers/stability.js')
+
+    const adapters: Record<string, any> = {
+      groq: groqSTT, 'openai-stt': openaiSTT,
+      'groq-whisper': groqSTT, 'openai-whisper': openaiSTT,
+      deepseek: deepseekLLM, mistral: mistralLLM, openai: openaiLLM, anthropic: anthropicLLM,
+      'openai-image': openaiImage, 'gpt-image': openaiImage, gemini: geminiImage, stability: stabilityImage, 'stability-ai': stabilityImage,
+    }
+
+    const adapterKey = category === 'image' && provider === 'openai' ? 'openai-image' : provider
+    const adapter = adapters[adapterKey]
+    if (!adapter) {
+      return { ok: false, message: `No adapter for provider: ${provider}`, latencyMs: 0 }
+    }
+
+    return await adapter.testConnection(apiKey, baseUrl, model)
+  } catch (err) {
+    return { ok: false, message: `Validation error: ${(err as Error).message}`, latencyMs: 0 }
+  }
+}
+
+export async function createAIProvider(data: AIProviderInput, validate = true): Promise<AIProvider> {
+  if (validate && data.apiKey) {
+    const validation = await validateProviderConnection(data.provider, data.category, data.apiKey, data.baseUrl, data.model)
+    if (!validation.ok) {
+      throw new Error(`Validation failed: ${validation.message}`)
+    }
+  }
   const now = new Date().toISOString()
   const id = randomUUID()
+  const encryptedKey = await encryptSecret(data.apiKey || '')
   await getDb().insert(aiProviders).values({
     id,
     category: data.category,
     provider: data.provider,
     displayName: data.displayName,
-    apiKey: data.apiKey,
+    apiKey: encryptedKey,
     baseUrl: data.baseUrl,
     model: data.model,
     config: data.config as Record<string, unknown>,
@@ -1904,18 +2590,34 @@ export async function listAIProviders(category?: AIProviderCategory): Promise<AI
     query = getDb().select().from(aiProviders)
   }
   const result = await query.orderBy(aiProviders.category, aiProviders.displayName)
-  return result.map(aiProviderFromRow)
+  const rows: AIProvider[] = []
+  for (const row of result) {
+    rows.push(await aiProviderFromRow(row))
+  }
+  return rows
 }
 
-export async function updateAIProvider(id: string, patch: Partial<AIProviderInput>): Promise<AIProvider> {
+export async function updateAIProvider(id: string, patch: Partial<AIProviderInput>, validate = true): Promise<AIProvider> {
   const existing = await getAIProvider(id)
   if (!existing) throw new Error(`AI provider ${id} not found`)
-  const updated = { ...existing, ...patch, updatedAt: new Date().toISOString() }
+
+  // Masked input (bullets) means the admin did not change the secret — keep the existing key.
+  const isMasked = patch.apiKey !== undefined && patch.apiKey.includes('••')
+  const apiKeyToStore = isMasked ? existing.apiKey : (patch.apiKey ?? existing.apiKey)
+
+  const updated = { ...existing, ...patch, apiKey: apiKeyToStore, updatedAt: new Date().toISOString() }
+  if (validate && apiKeyToStore && !isMasked) {
+    const validation = await validateProviderConnection(updated.provider, updated.category, apiKeyToStore, updated.baseUrl, updated.model)
+    if (!validation.ok) {
+      throw new Error(`Validation failed: ${validation.message}`)
+    }
+  }
+  const encryptedKey = isMasked ? existing.apiKey : await encryptSecret(apiKeyToStore || '')
   await getDb().update(aiProviders).set({
     category: updated.category,
     provider: updated.provider,
     displayName: updated.displayName,
-    apiKey: updated.apiKey,
+    apiKey: encryptedKey,
     baseUrl: updated.baseUrl,
     model: updated.model,
     config: updated.config as Record<string, unknown>,
@@ -1933,6 +2635,13 @@ export async function deleteAIProvider(id: string): Promise<void> {
 export async function setActiveAIProvider(id: string, category: AIProviderCategory): Promise<void> {
   const provider = await getAIProvider(id)
   if (!provider) throw new Error(`AI provider ${id} not found`)
+  if (!provider.apiKey) {
+    throw new Error(`Cannot activate: Provider "${provider.displayName}" has no API key configured`)
+  }
+  const cost = await getAICost(provider.provider, category)
+  if (!cost) {
+    throw new Error(`Cost configuration required for ${provider.provider} (${category}) before activation. Set costs in Admin > AI Providers > Cost Configuration.`)
+  }
   await getDb().update(aiProviders).set({ isActive: false })
     .where(eq(aiProviders.category, category))
   await getDb().update(aiProviders).set({ isActive: true, updatedAt: new Date().toISOString() })
@@ -1964,10 +2673,15 @@ function aiUsageLogFromRow(row: typeof aiUsageLogs.$inferSelect): AIUsageLog {
     success: row.success,
     error: row.error || '',
     createdAt: row.createdAt,
+    audioSeconds: row.audioSeconds,
+    imageCount: row.imageCount,
+    pricingVersionId: row.pricingVersionId || null,
+    unpriced: row.unpriced,
+    cachedInputTokens: row.cachedInputTokens ?? 0,
   }
 }
 
-export async function logAIUsage(data: Omit<AIUsageLog, 'id' | 'createdAt'>): Promise<AIUsageLog> {
+export async function logAIUsage(data: Omit<AIUsageLog, 'id' | 'createdAt' | 'pricingVersionId' | 'unpriced' | 'cachedInputTokens'> & { pricingVersionId?: string | null; unpriced?: boolean; cachedInputTokens?: number }): Promise<AIUsageLog> {
   const now = new Date().toISOString()
   const id = randomUUID()
   await getDb().insert(aiUsageLogs).values({
@@ -1981,6 +2695,11 @@ export async function logAIUsage(data: Omit<AIUsageLog, 'id' | 'createdAt'>): Pr
     tokensOutput: data.tokensOutput,
     estimatedCostCents: data.estimatedCostCents,
     durationMs: data.durationMs,
+    audioSeconds: data.audioSeconds ?? 0,
+    imageCount: data.imageCount ?? 0,
+    pricingVersionId: data.pricingVersionId,
+    unpriced: data.unpriced ?? false,
+    cachedInputTokens: data.cachedInputTokens ?? 0,
     success: data.success,
     error: data.error || null,
     createdAt: now,
@@ -2006,8 +2725,8 @@ export async function getAIUsageStats(opts: { from?: string; to?: string; catego
 
   const result = await getDb().select().from(aiUsageLogs).where(where)
 
-  const byCategory: Record<string, { requests: number; costCents: number }> = {}
-  const byProvider: Record<string, { requests: number; costCents: number }> = {}
+  const byCategory: Record<string, { requests: number; costCents: number; tokensInput: number; tokensOutput: number }> = {}
+  const byProvider: Record<string, { requests: number; costCents: number; tokensInput: number; tokensOutput: number }> = {}
 
   let totalRequests = 0
   let totalTokensInput = 0
@@ -2020,13 +2739,17 @@ export async function getAIUsageStats(opts: { from?: string; to?: string; catego
     totalTokensOutput += row.tokensOutput
     totalCostCents += row.estimatedCostCents
 
-    if (!byCategory[row.category]) byCategory[row.category] = { requests: 0, costCents: 0 }
+    if (!byCategory[row.category]) byCategory[row.category] = { requests: 0, costCents: 0, tokensInput: 0, tokensOutput: 0 }
     byCategory[row.category].requests++
     byCategory[row.category].costCents += row.estimatedCostCents
+    byCategory[row.category].tokensInput += row.tokensInput
+    byCategory[row.category].tokensOutput += row.tokensOutput
 
-    if (!byProvider[row.providerId]) byProvider[row.providerId] = { requests: 0, costCents: 0 }
+    if (!byProvider[row.providerId]) byProvider[row.providerId] = { requests: 0, costCents: 0, tokensInput: 0, tokensOutput: 0 }
     byProvider[row.providerId].requests++
     byProvider[row.providerId].costCents += row.estimatedCostCents
+    byProvider[row.providerId].tokensInput += row.tokensInput
+    byProvider[row.providerId].tokensOutput += row.tokensOutput
   }
 
   return { totalRequests, totalTokensInput, totalTokensOutput, totalCostCents, byCategory, byProvider }
@@ -2069,6 +2792,211 @@ function aiCostFromRow(row: typeof aiProviderCosts.$inferSelect): AICostConfig {
 export async function listAICosts(): Promise<AICostConfig[]> {
   const result = await getDb().select().from(aiProviderCosts).orderBy(aiProviderCosts.provider)
   return result.map(aiCostFromRow)
+}
+
+export async function getActivePricingVersion(provider: string, category: AIProviderCategory): Promise<{ id: string; version: number; inputRate: number; outputRate: number; cachedInputRate: number; imageRate: number; audioRate: number; effectiveFrom: string; effectiveUntil: string | null; source: string; lastVerifiedAt: string | null } | undefined> {
+  // Same-vendor alias groups: pricing seeded under one canonical key must be
+  // usable by a provider registered under an alias name (e.g. provider
+  // 'gpt-image' can use pricing seeded as 'openai:image'). Aliases never cross
+  // vendors, so a missing price for 'groq' is never satisfied by 'openai-stt'.
+  const PROVIDER_ALIAS_GROUPS: Record<AIProviderCategory, string[][]> = {
+    image: [['openai', 'openai-image', 'gpt-image']],
+    stt: [['groq', 'groq-whisper'], ['openai-stt', 'openai-whisper']],
+    llm: [],
+  }
+  const group = PROVIDER_ALIAS_GROUPS[category]?.find((g) => g.includes(provider)) || null
+
+  // Prefer the exact provider key; fall back to same-vendor aliases only.
+  let result = await getDb().select().from(aiProviderCostVersions)
+    .where(and(eq(aiProviderCostVersions.provider, provider), eq(aiProviderCostVersions.category, category), eq(aiProviderCostVersions.active, true)))
+    .limit(1)
+  if (result.length === 0 && group) {
+    result = await getDb().select().from(aiProviderCostVersions)
+      .where(and(inArray(aiProviderCostVersions.provider, group), eq(aiProviderCostVersions.category, category), eq(aiProviderCostVersions.active, true)))
+      .limit(1)
+  }
+  if (result.length === 0) return undefined
+  const row = result[0]
+  return {
+    id: row.id,
+    version: row.version,
+    inputRate: row.inputRate,
+    outputRate: row.outputRate,
+    cachedInputRate: row.cachedInputRate,
+    imageRate: row.imageRate,
+    audioRate: row.audioRate,
+    effectiveFrom: row.effectiveFrom,
+    effectiveUntil: row.effectiveUntil,
+    source: row.source,
+    lastVerifiedAt: row.lastVerifiedAt,
+  }
+}
+
+export async function upsertAICostVersion(data: { provider: string; category: AIProviderCategory; inputRate: number; outputRate: number; cachedInputRate?: number; imageRate?: number; audioRate?: number; source?: string; lastVerifiedAt?: string }): Promise<{ id: string; version: number; inputRate: number; outputRate: number; cachedInputRate: number; imageRate: number; audioRate: number; effectiveFrom: string; effectiveUntil: string | null; source: string; lastVerifiedAt: string | null }> {
+  const now = new Date().toISOString()
+  const existingActive = await getDb().select().from(aiProviderCostVersions)
+    .where(and(eq(aiProviderCostVersions.provider, data.provider), eq(aiProviderCostVersions.category, data.category), eq(aiProviderCostVersions.active, true)))
+    .limit(1)
+
+  let previousCachedInputRate = 0
+  if (existingActive.length > 0) {
+    // A cost change creates a NEW version — the previous active version is
+    // closed (never mutated) so historical usage keeps its pinned pricing.
+    const row = existingActive[0]
+    previousCachedInputRate = row.cachedInputRate
+    await getDb().update(aiProviderCostVersions).set({
+      active: false,
+      status: 'superseded',
+      effectiveUntil: now,
+      updatedAt: now,
+    }).where(eq(aiProviderCostVersions.id, row.id))
+  }
+
+  const versionRows = await getDb().select({ maxV: sql<number>`COALESCE(MAX(${aiProviderCostVersions.version}), 0)` }).from(aiProviderCostVersions)
+    .where(and(eq(aiProviderCostVersions.provider, data.provider), eq(aiProviderCostVersions.category, data.category)))
+  const version = Number(versionRows[0]?.maxV ?? 0) + 1
+
+  const id = randomUUID()
+  await getDb().insert(aiProviderCostVersions).values({
+    id,
+    provider: data.provider,
+    category: data.category,
+    version,
+    inputRate: data.inputRate,
+    outputRate: data.outputRate,
+    cachedInputRate: data.cachedInputRate ?? previousCachedInputRate,
+    imageRate: data.imageRate ?? 0,
+    audioRate: data.audioRate ?? 0,
+    effectiveFrom: now,
+    source: data.source ?? 'admin',
+    lastVerifiedAt: data.lastVerifiedAt,
+    active: true,
+    status: 'approved',
+    createdAt: now,
+    updatedAt: now,
+  })
+
+  return { id, version: version, inputRate: data.inputRate, outputRate: data.outputRate, cachedInputRate: data.cachedInputRate ?? previousCachedInputRate, imageRate: data.imageRate ?? 0, audioRate: data.audioRate ?? 0, effectiveFrom: now, effectiveUntil: null, source: data.source ?? 'admin', lastVerifiedAt: data.lastVerifiedAt ?? null }
+}
+
+export async function listAICostVersions(provider: string, category: AIProviderCategory): Promise<{ id: string; version: number; inputRate: number; outputRate: number; cachedInputRate: number; imageRate: number; audioRate: number; effectiveFrom: string; effectiveUntil: string | null; source: string; lastVerifiedAt: string | null; status: string; active: boolean }[]> {
+  const result = await getDb().select().from(aiProviderCostVersions)
+    .where(and(eq(aiProviderCostVersions.provider, provider), eq(aiProviderCostVersions.category, category)))
+    .orderBy(desc(aiProviderCostVersions.version))
+  return result.map(r => ({
+    id: r.id,
+    version: r.version,
+    inputRate: r.inputRate,
+    outputRate: r.outputRate,
+    cachedInputRate: r.cachedInputRate,
+    imageRate: r.imageRate,
+    audioRate: r.audioRate,
+    effectiveFrom: r.effectiveFrom,
+    effectiveUntil: r.effectiveUntil,
+    source: r.source,
+    lastVerifiedAt: r.lastVerifiedAt,
+    status: r.status,
+    active: r.active,
+  }))
+}
+
+// ---- Admin-Reviewed Pricing Versioning ----
+
+/**
+ * Creates a NEW pricing version as a PENDING proposal. The currently active
+ * version is untouched — only admin approval (approveCostVersion) can make this
+ * proposal effective. Historical versions are never mutated.
+ */
+export async function createCostVersionProposal(data: { provider: string; category: AIProviderCategory; inputRate: number; outputRate: number; cachedInputRate?: number; imageRate?: number; audioRate?: number; source?: string; lastVerifiedAt?: string }): Promise<{ id: string; version: number; inputRate: number; outputRate: number; cachedInputRate: number; imageRate: number; audioRate: number; effectiveFrom: string; effectiveUntil: string | null; source: string; lastVerifiedAt: string | null; status: string; active: boolean }> {
+  const now = new Date().toISOString()
+  const versionRows = await getDb().select({ maxV: sql<number>`COALESCE(MAX(${aiProviderCostVersions.version}), 0)` }).from(aiProviderCostVersions)
+    .where(and(eq(aiProviderCostVersions.provider, data.provider), eq(aiProviderCostVersions.category, data.category)))
+  const version = Number(versionRows[0]?.maxV ?? 0) + 1
+  const id = randomUUID()
+  await getDb().insert(aiProviderCostVersions).values({
+    id,
+    provider: data.provider,
+    category: data.category,
+    version,
+    inputRate: data.inputRate,
+    outputRate: data.outputRate,
+    cachedInputRate: data.cachedInputRate ?? 0,
+    imageRate: data.imageRate ?? 0,
+    audioRate: data.audioRate ?? 0,
+    effectiveFrom: now,
+    source: data.source ?? 'admin',
+    lastVerifiedAt: data.lastVerifiedAt,
+    active: false,
+    status: 'pending',
+    createdAt: now,
+    updatedAt: now,
+  })
+  return { id, version, inputRate: data.inputRate, outputRate: data.outputRate, cachedInputRate: data.cachedInputRate ?? 0, imageRate: data.imageRate ?? 0, audioRate: data.audioRate ?? 0, effectiveFrom: now, effectiveUntil: null, source: data.source ?? 'admin', lastVerifiedAt: data.lastVerifiedAt ?? null, status: 'pending', active: false }
+}
+
+/**
+ * Approves a pending pricing proposal and makes it the single active version.
+ * The previously active version is superseded (active=false, effectiveUntil set)
+ * and NEVER mutated. Re-runs the margin guard — a proposed change that has since
+ * become loss-making cannot be approved.
+ */
+export async function approveCostVersion(id: string): Promise<{ ok: boolean; error?: string; lossPackages?: string[]; marginStatus?: 'BLOCK' | 'WARNING' | 'PROFITABLE' }> {
+  const db = getDb()
+  const now = new Date().toISOString()
+  const proposal = await db.select().from(aiProviderCostVersions).where(eq(aiProviderCostVersions.id, id)).limit(1)
+  if (proposal.length === 0) return { ok: false, error: 'Pricing version not found' }
+  const row = proposal[0]
+  if (row.status !== 'pending') return { ok: false, error: 'Pricing version is not pending' }
+
+  const { checkProposedMargin } = await import('./lib/profitability.js')
+  const margin = await checkProposedMargin([{
+    provider: row.provider,
+    category: row.category as AIProviderCategory,
+    inputRate: row.inputRate,
+    outputRate: row.outputRate,
+    imageRate: row.imageRate,
+    audioRate: row.audioRate,
+  }])
+  if (margin.result === 'BLOCK') {
+    return { ok: false, error: `Cannot approve: this pricing would make package(s) unprofitable: ${margin.lossPackages.join(', ')}`, lossPackages: margin.lossPackages, marginStatus: 'BLOCK' }
+  }
+
+  await db.transaction(async (tx) => {
+    await tx.update(aiProviderCostVersions).set({ active: false, status: 'superseded', effectiveUntil: now, updatedAt: now })
+      .where(and(eq(aiProviderCostVersions.provider, row.provider), eq(aiProviderCostVersions.category, row.category), eq(aiProviderCostVersions.active, true)))
+
+    const activated = await tx.update(aiProviderCostVersions).set({ active: true, status: 'approved', effectiveFrom: now, updatedAt: now })
+      .where(and(eq(aiProviderCostVersions.id, id), eq(aiProviderCostVersions.status, 'pending')))
+      .returning({ id: aiProviderCostVersions.id })
+    if (activated.length === 0) {
+      throw new Error('Pricing proposal already processed')
+    }
+  })
+
+  // Keep the legacy mutable mirror in sync so existing read paths stay consistent.
+  await upsertAICost({
+    provider: row.provider,
+    category: row.category as AIProviderCategory,
+    costPer1MInputTokens: row.inputRate,
+    costPer1MOutputTokens: row.outputRate,
+    costPerImage: row.imageRate,
+    costPerAudioMinute: row.audioRate,
+  })
+
+  return { ok: true, marginStatus: margin.result }
+}
+
+/**
+ * Rejects a pending pricing proposal. It never becomes active and historical
+ * versions remain untouched.
+ */
+export async function rejectCostVersion(id: string): Promise<{ ok: boolean; error?: string }> {
+  const result = await getDb().update(aiProviderCostVersions)
+    .set({ status: 'rejected', active: false, updatedAt: new Date().toISOString() })
+    .where(and(eq(aiProviderCostVersions.id, id), eq(aiProviderCostVersions.status, 'pending')))
+    .returning({ id: aiProviderCostVersions.id })
+  if (result.length === 0) return { ok: false, error: 'Pricing version not found or not pending' }
+  return { ok: true }
 }
 
 export async function upsertAICost(data: { provider: string; category: AIProviderCategory; costPer1MInputTokens?: number; costPer1MOutputTokens?: number; costPerImage?: number; costPerAudioMinute?: number }): Promise<AICostConfig> {

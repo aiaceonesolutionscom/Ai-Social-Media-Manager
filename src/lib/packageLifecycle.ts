@@ -2,6 +2,10 @@ import { getUser, getPackage, updateUser, createTokenTransaction } from '../stor
 import { clearFeatureCache } from './packagePermissions.js'
 import { auditLogger } from './AuditLogger.js'
 import { logger } from './logger.js'
+import { getDb } from '../db.js'
+import { eq } from 'drizzle-orm'
+import { users, tokenTransactions } from '../db/schema.js'
+import { randomUUID } from 'node:crypto'
 import type { User } from '../types.js'
 
 export type PackageStatus = User['packageStatus']
@@ -31,24 +35,42 @@ export async function activatePackage(phone: string, packageId: string, opts: { 
   const tokens = opts.tokens ?? pkg.includedTokens
   const expiresAt = computeExpiry(pkg.billingPeriod || 'monthly')
 
-  const user = await updateUser(phone, {
-    packageId: pkg.slug,
-    packageStatus: 'active',
-    packageStartedAt: new Date().toISOString(),
-    packageExpiresAt: expiresAt,
-    packageEndedAt: '',
-    tokensRemaining: tokens,
-  })
-  clearFeatureCache(phone)
+  const now = new Date().toISOString()
 
-  await createTokenTransaction({
-    phone,
-    type: 'grant',
-    amount: tokens,
-    balanceAfter: tokens,
-    description: opts.description || `Package activation — ${pkg.name}`,
-    adminId: opts.actor,
+  const updated = await getDb().transaction(async (tx) => {
+    const result = await tx
+      .update(users)
+      .set({
+        packageId: pkg.slug,
+        packageStatus: 'active',
+        packageStartedAt: now,
+        packageExpiresAt: expiresAt,
+        packageEndedAt: null,
+        tokensRemaining: tokens,
+        updatedAt: now,
+      })
+      .where(eq(users.phone, phone))
+      .returning()
+
+    if (result.length === 0) throw new Error(`User ${phone} not found`)
+
+    await tx.insert(tokenTransactions).values({
+      id: randomUUID(),
+      phone,
+      type: 'grant',
+      amount: tokens,
+      balanceAfter: tokens,
+      description: opts.description || `Package activation — ${pkg.name}`,
+      postId: null,
+      adminId: opts.actor || null,
+      operationId: null,
+      createdAt: now,
+    })
+
+    return result[0]
   })
+
+  clearFeatureCache(phone)
 
   auditLogger.log({
     actor: opts.actor || phone,
@@ -59,7 +81,7 @@ export async function activatePackage(phone: string, packageId: string, opts: { 
   })
 
   logger.info({ phone, package: pkg.slug, tokens, expiresAt }, 'package activated')
-  return user
+  return updated as unknown as User
 }
 
 /**

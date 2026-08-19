@@ -61,7 +61,7 @@ describe('Scenario 3 — image generation failure is retried and produces a new 
     expect(post.imageUrl).toBeDefined()
   }, 15000)
 
-  it('consecutive image failures end in a FAILED post with a user-facing error', async () => {
+  it('consecutive image failures degrade gracefully to a preview without an image', async () => {
     chatJsonMock.mockResolvedValue({
       action: 'generate_post',
       intent: { topic: 'morning routine', audience: 'all', tone: 'friendly', goal: 'educate', language: 'English', emotion: 'positive' },
@@ -72,8 +72,9 @@ describe('Scenario 3 — image generation failure is retried and produces a new 
     const posts = await listPosts()
     const postId = posts[posts.length - 1].id
 
-    const post = await waitForStatus(postId, 'FAILED')
-    expect(post.error).toContain('OpenAI quota exceeded')
+    const post = await waitForStatus(postId, 'AWAITING_APPROVAL')
     expect(generateImageMock).toHaveBeenCalledTimes(3)
+    expect(post.status).toBe('AWAITING_APPROVAL')
+    expect(post.imageUrl).toBe('')
   }, 15000)
 })

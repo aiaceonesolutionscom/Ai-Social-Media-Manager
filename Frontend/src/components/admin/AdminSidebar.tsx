@@ -1,4 +1,4 @@
-import React from 'react';
+
 import { useNavigate } from 'react-router-dom';
 import {
   BarChart3Icon,
@@ -13,7 +13,8 @@ import {
   ShieldIcon,
   UserCogIcon,
   ScrollTextIcon,
-  UserRoundIcon } from
+  UserRoundIcon,
+  AlertTriangleIcon } from
 'lucide-react';
 import { Logo } from '../ui/Logo';
 import { notify } from '../ui/Toast';
@@ -24,6 +25,7 @@ import { Sidebar, type SidebarNavItem } from '../layout/Sidebar';
 const navItems: Array<SidebarNavItem & { permission: string }> = [
   { label: 'Dashboard', to: '/admin/dashboard', icon: LayoutDashboardIcon, end: true, permission: 'dashboard.view' },
   { label: 'Audit Log', to: '/admin/audit', icon: ScrollTextIcon, permission: 'logs.view' },
+  { label: 'Errors', to: '/admin/errors', icon: AlertTriangleIcon, permission: 'logs.view' },
   { label: 'Reports', to: '/admin/reports', icon: BarChart3Icon, permission: 'reports.view' },
   { label: 'Users', to: '/admin/users', icon: UsersIcon, permission: 'users.view' },
   { label: 'Packages', to: '/admin/packages', icon: PackageIcon, permission: 'packages.view' },
@@ -34,7 +36,7 @@ const navItems: Array<SidebarNavItem & { permission: string }> = [
   { label: 'Admins', to: '/admin/admins', icon: UserCogIcon, permission: 'admins.view' },
   { label: 'Support', to: '/admin/support', icon: HelpCircleIcon, permission: 'support.view' },
   { label: 'Settings', to: '/admin/settings', icon: SettingsIcon, permission: 'settings.view' },
-  { label: 'Profile', to: '/admin/profile', icon: UserRoundIcon },
+  { label: 'Profile', to: '/admin/profile', icon: UserRoundIcon, permission: 'profile.view' },
 ];
 
 function initials(name: string): string {

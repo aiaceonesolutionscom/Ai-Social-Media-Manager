@@ -10,6 +10,7 @@ import {
   createSupportReply,
   getSupportReplies,
   listAllSupportReplies,
+  createNotification,
   getAccountByPlatform,
 } from '../store.js'
 import { requireFeature } from '../lib/packagePermissions.js'
@@ -48,6 +49,12 @@ export async function registerSupportRoutes(server: FastifyInstance): Promise<vo
 
     try {
       const ticket = await createSupportTicket({ phone, subject, message, priority })
+      try {
+        const { notifySupportTicketCreated } = await import('../lib/notifications.js')
+        await notifySupportTicketCreated(phone, subject, message.trim())
+      } catch (notifErr) {
+        logger.warn({ error: (notifErr as Error).message }, 'failed to notify admin of new support ticket')
+      }
       return reply.status(201).send({ ticket })
     } catch (err: any) {
       logger.error({ error: err.message, phone }, 'Failed to create support ticket')
@@ -102,6 +109,12 @@ export async function registerSupportRoutes(server: FastifyInstance): Promise<vo
 
     const replyRecord = await createSupportReply({ ticketId: id, role: 'user', body: message.trim() })
     await updateSupportTicket(id, { status: 'open' })
+    try {
+      const { notifySupportUserReply } = await import('../lib/notifications.js')
+      await notifySupportUserReply(phone, ticket.subject, message.trim())
+    } catch (notifErr) {
+      logger.warn({ error: (notifErr as Error).message }, 'failed to notify admin of user support reply')
+    }
     return reply.status(201).send({ reply: replyRecord })
   })
 
@@ -156,6 +169,19 @@ export async function registerSupportRoutes(server: FastifyInstance): Promise<vo
 
       const replyRecord = await createSupportReply({ ticketId: id, role: 'admin', body: message.trim() })
       await updateSupportTicket(id, { status: 'replied' })
+
+      try {
+        await createNotification({
+          targetType: 'user',
+          targetPhone: ticket.phone,
+          category: 'support',
+          title: 'Support Reply',
+          body: `Our team replied on "${ticket.subject}"`,
+          data: { subject: ticket.subject, reply: message.trim() },
+        })
+      } catch (notifErr) {
+        logger.warn({ ticketId: id, error: (notifErr as Error).message }, 'failed to save support reply notification')
+      }
 
       const pushNumber = await resolvePushNumber(ticket.phone)
       try {

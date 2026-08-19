@@ -13,7 +13,7 @@ export const stabilityImage: ImageProviderAdapter = {
         Authorization: `Bearer ${apiKey}`,
         Accept: 'image/*',
       },
-      body: new URLSearchParams({ prompt, aspect_ratio: '1:1' }),
+      body: new URLSearchParams({ prompt, aspect_ratio: options?.size || '1:1' }),
     })
     if (!res.ok) {
       const text = await res.text().catch(() => res.statusText)

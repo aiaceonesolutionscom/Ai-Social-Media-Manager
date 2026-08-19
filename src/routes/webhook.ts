@@ -76,20 +76,23 @@ async function handleButton(phone: string, buttonId: string): Promise<void> {
     return
   }
 
+  if (buttonId === 'branding_yes' || buttonId === 'branding_no') {
+    await handleUserInput(phone, buttonId === 'branding_yes' ? 'branding_yes' : 'branding_no')
+    return
+  }
+
   if (buttonId === 'ad_approve') {
     const conv = await getConversation(phone)
     if ((conv as any).kind === 'ad_preview') {
-      const { handleAdConversation } = await import('../pipeline/adConversation.js')
-      const convState: any = { kind: 'ad_preview', campaignId: (conv as any).postId, data: (conv as any).data }
-      await handleAdConversation(phone, 'approve', convState)
+      const { launchAdCampaign } = await import('../pipeline/adConversation.js')
+      await launchAdCampaign((conv as any).postId)
     }
     return
   }
 
   if (buttonId === 'ad_edit') {
-    const { handleAdConversation } = await import('../pipeline/adConversation.js')
-    const convState: any = { kind: 'ad_preview', campaignId: (await getConversation(phone) as any).postId }
-    await handleAdConversation(phone, 'edit', convState)
+    // Route through the main conversation handler for natural editing
+    await handleUserInput(phone, 'edit the ad')
     return
   }
 
@@ -114,7 +117,7 @@ export async function handleWebhook(req: unknown): Promise<{ status: number; bod
     id: string
     type: string
     text?: { body: string }
-    audio?: { id: string; mime_type: string; voice?: boolean }
+    audio?: { id: string; mime_type: string; voice?: boolean; seconds?: number }
     interactive?: { type: string; button_reply?: { id: string } }
   }
 
@@ -156,16 +159,40 @@ export async function handleWebhook(req: unknown): Promise<{ status: number; bod
       }
     }
 
+    // Stable billing idempotency key derived from the WhatsApp message id — a
+    // retried/duplicated delivery of the SAME message must never charge twice.
+    // The random UUID below is ONLY used as a storage filename identity.
+    const voiceClaimKey = `voice:${msg.id}`
+    const audioId = randomUUID()
     try {
+      const { tokenEngine } = await import('../lib/TokenEngine.js')
+      const charge = await tokenEngine.chargeVoiceOnce(voiceClaimKey, userPhone, 'Voice transcription')
+      if (!charge.success && !charge.alreadyCharged) {
+        await sendText(from, `❌ You need ${charge.error === 'Insufficient tokens' ? 'enough tokens' : 'tokens'} to transcribe voice notes. Please upgrade your plan or buy more tokens.`)
+        return { status: 200, body: 'ok' }
+      }
+
+      // Duplicate/retried delivery: already charged exactly once — do NOT process
+      // again (no extra credit, no second provider call, no duplicate handling).
+      if (charge.alreadyCharged) {
+        return { status: 200, body: 'ok' }
+      }
+
       await sendText(from, '🎙️ Got your voice note, processing...')
       const audioBuffer = await downloadMedia(msg.audio.id)
-      const audioId = randomUUID()
       const relPath = saveAudioBuffer(audioBuffer, audioId)
-      const transcript = await transcribeAudio(path.join(storageDir(), relPath))
+      const durationMs = (msg.audio?.seconds ?? 0) * 1000
+      const transcript = await transcribeAudio(path.join(storageDir(), relPath), { phone: userPhone, durationMs })
       await handleVoiceInput(from, transcript, { waMsgId: msg.id })
     } catch (err) {
       logger.error({ from, error: (err as Error).message }, 'voice processing failed')
       await sendText(from, `❌ Sorry, I could not process that voice note: ${(err as Error).message}`)
+      try {
+        const { tokenEngine } = await import('../lib/TokenEngine.js')
+        await tokenEngine.refundVoiceOnce(voiceClaimKey, userPhone, 'Voice transcription refund')
+      } catch (refundErr) {
+        logger.error({ refundErr: (refundErr as Error).message }, 'voice transcription refund failed')
+      }
       const convo = await getConversation(from)
       await setConversation(from, { kind: 'idle', postId: convo.postId })
     }

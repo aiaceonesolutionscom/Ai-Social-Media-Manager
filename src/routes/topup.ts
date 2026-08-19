@@ -35,7 +35,8 @@ export async function registerTopUpRoutes(server: FastifyInstance): Promise<void
     if (!config.stripe.secretKey) {
       if (config.dev.enabled) {
         const { grantTokens } = await import('../lib/tokens.js')
-        await grantTokens(session.phone, bundle.tokens, 'system', `Top-up — ${bundle.tokens} tokens`)
+        const opId = crypto.randomUUID()
+        await grantTokens(session.phone, bundle.tokens, 'system', `Top-up — ${bundle.tokens} tokens`, opId)
 
         await createPayment({
           phone: session.phone,

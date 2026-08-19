@@ -9,6 +9,9 @@ export interface BrandIdentity extends BrandProfile {
   tagline?: string
   colors?: string[]
   logoPath?: string
+  address?: string
+  website?: string
+  contact?: string
 }
 
 export function buildBrandContext(brand?: BrandProfile): string {
@@ -18,6 +21,9 @@ export function buildBrandContext(brand?: BrandProfile): string {
   if (b.tagline) parts.push(`- brand tagline: ${b.tagline}`)
   if (b.voice) parts.push(`- brand voice: ${b.voice}`)
   if (b.toneGuidelines) parts.push(`- brand tone guidelines: ${b.toneGuidelines}`)
+  if (b.address) parts.push(`- brand address: ${b.address}`)
+  if (b.website) parts.push(`- brand website: ${b.website}`)
+  if (b.contact) parts.push(`- brand contact info: ${b.contact}`)
   if (Array.isArray(b.colors) && b.colors.length > 0) parts.push(`- brand colors: ${b.colors.join(', ')}`)
   if (parts.length === 0) return ''
   return `\nBRAND IDENTITY (naturally weave this into the post when it fits, but never force it):\n${parts.join('\n')}`

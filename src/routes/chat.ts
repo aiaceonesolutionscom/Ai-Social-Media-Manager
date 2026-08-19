@@ -69,7 +69,7 @@ export async function registerChatRoutes(server: FastifyInstance): Promise<void>
 
     const chatPhone = await resolveChatPhone(phone)
     try {
-      await handleUserInput(chatPhone, message.trim(), { waMsgId: `web_${Date.now()}_${crypto.randomUUID()}` })
+      await handleUserInput(chatPhone, message.trim(), { waMsgId: `web_${Date.now()}_${crypto.randomUUID()}`, channel: 'webchat' })
       return reply.send({ ok: true })
     } catch (err: any) {
       logger.error({ error: err.message, phone }, 'Failed to process chat message')

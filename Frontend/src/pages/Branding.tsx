@@ -14,10 +14,13 @@ interface BrandProfile {
   voice: string;
   toneGuidelines: string;
   colors: string[];
+  address: string;
+  website: string;
+  contact: string;
   logoUrl?: string | null;
 }
 
-const EMPTY: BrandProfile = { brandName: '', tagline: '', voice: '', toneGuidelines: '', colors: [] };
+const EMPTY: BrandProfile = { brandName: '', tagline: '', voice: '', toneGuidelines: '', colors: [], address: '', website: '', contact: '' };
 
 export function BrandingPage() {
   const navigate = useNavigate();
@@ -26,8 +29,43 @@ export function BrandingPage() {
   const [uploading, setUploading] = React.useState(false);
   const [profile, setProfile] = React.useState<BrandProfile>(EMPTY);
   const [colorInput, setColorInput] = React.useState('');
+  const [brandingEnabled, setBrandingEnabled] = React.useState(true);
+  const [loadingSettings, setLoadingSettings] = React.useState(false);
 
   const hasBranding = !featuresLoading && features['custom_branding'] === true;
+
+  React.useEffect(() => {
+    if (hasBranding) {
+      loadBrandingSettings();
+    }
+  }, [hasBranding]);
+
+  const loadBrandingSettings = async () => {
+    setLoadingSettings(true);
+    try {
+      const data = await apiRequest<{ brandingEnabled: boolean }>(endpoints.brandSettings);
+      setBrandingEnabled(data.brandingEnabled ?? true);
+    } catch (err) {
+      // Ignore errors, default to true
+    } finally {
+      setLoadingSettings(false);
+    }
+  };
+
+  const toggleBranding = async (enabled: boolean) => {
+    setBrandingEnabled(enabled);
+    try {
+      await apiRequest(endpoints.brandSettings, {
+        method: 'PUT',
+        body: JSON.stringify({ brandingEnabled: enabled }),
+      });
+      notify.success(enabled ? 'Branding enabled' : 'Branding disabled', 
+        enabled ? 'Your branding will be applied to future posts.' : 'Your branding will be skipped for future posts.');
+    } catch (err) {
+      setBrandingEnabled(!enabled); // Revert on error
+      notify.error('Failed to update', (err as Error).message);
+    }
+  };
 
   React.useEffect(() => {
     if (featuresLoading || features['custom_branding'] !== true) return;
@@ -55,6 +93,9 @@ export function BrandingPage() {
           voice: profile.voice,
           toneGuidelines: profile.toneGuidelines,
           colors: profile.colors,
+          address: profile.address,
+          website: profile.website,
+          contact: profile.contact,
         }),
       });
       setProfile((p) => ({ ...p, ...(data.profile || {}) }));
@@ -146,6 +187,28 @@ export function BrandingPage() {
 
         <div className="grid gap-6">
           <Card>
+            <div className="flex items-center justify-between">
+              <div>
+                <h3 className="text-lg font-semibold flex items-center gap-2">
+                  <PaletteIcon className="h-5 w-5 text-indigo-500" />
+                  Enable Branding on Posts
+                </h3>
+                <p className="text-sm text-slate-500 mt-1">When enabled, your brand logo, colors, and voice will be automatically applied to generated posts. You can still choose per-post in chat.</p>
+              </div>
+              <label className="relative inline-flex items-center cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={brandingEnabled}
+                  onChange={(e) => toggleBranding(e.target.checked)}
+                  disabled={loadingSettings}
+                  className="sr-only peer"
+                />
+                <div className="w-11 h-6 bg-slate-200 peer-focus:outline-none peer-focus:ring-4 peer-focus:ring-indigo-300 dark:peer-focus:ring-indigo-800 rounded-full peer dark:bg-slate-700 peer-checked:after:translate-x-full rtl:peer-checked:after:-translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:start-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all dark:border-slate-600 peer-checked:bg-indigo-600"></div>
+              </label>
+            </div>
+          </Card>
+
+          <Card>
             <h3 className="text-lg font-semibold mb-4 flex items-center gap-2">
               <PaletteIcon className="h-5 w-5 text-indigo-500" />
               Brand Logo
@@ -203,8 +266,30 @@ export function BrandingPage() {
                 placeholder="How should the brand speak? Short sentences, no slang, always encouraging..."
                 rows={3}
               />
+              <p className="text-xs text-slate-500">The fields below are optional — add whichever details you want. You can fill only your name and skip the rest.</p>
+              <Input
+                label="Address"
+                value={profile.address}
+                onChange={(e) => setProfile((p) => ({ ...p, address: e.target.value }))}
+                placeholder="e.g. 12 Main Street, Lahore"
+              />
+              <Input
+                label="Website"
+                value={profile.website}
+                onChange={(e) => setProfile((p) => ({ ...p, website: e.target.value }))}
+                placeholder="e.g. https://yourbrand.com"
+              />
+              <Input
+                label="Contact"
+                value={profile.contact}
+                onChange={(e) => setProfile((p) => ({ ...p, contact: e.target.value }))}
+                placeholder="e.g. phone number or email"
+              />
               <div>
                 <label className="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-1.5">Brand colors (max 6)</label>
+                <p className="mb-2 text-xs text-slate-500">
+                  Optional — pick colors that represent your brand. They subtly reflect your brand in generated posts and captions.
+                </p>
                 <div className="flex flex-wrap items-center gap-2">
                   {profile.colors.map((c) => (
                     <span key={c} className="inline-flex items-center gap-1.5 rounded-full border border-slate-200 px-2.5 py-1 text-xs dark:border-slate-700">
@@ -215,14 +300,21 @@ export function BrandingPage() {
                       </button>
                     </span>
                   ))}
-                  <input
-                    value={colorInput}
-                    onChange={(e) => setColorInput(e.target.value)}
-                    onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); addColor(); } }}
-                    placeholder="#FF5733"
-                    className="h-9 w-32 rounded-lg border border-slate-300 px-3 text-sm dark:border-slate-600 dark:bg-slate-800"
-                  />
-                  <Button variant="secondary" size="sm" onClick={addColor}>Add</Button>
+                  <label className="inline-flex items-center gap-2 rounded-lg border border-slate-300 px-3 py-1.5 text-sm dark:border-slate-600 dark:bg-slate-800">
+                    <input
+                      type="color"
+                      value={colorInput || '#FF5733'}
+                      onChange={(e) => {
+                        const c = e.target.value;
+                        setColorInput(c);
+                        if (!profile.colors.includes(c)) {
+                          setProfile((p) => ({ ...p, colors: [...p.colors, c].slice(0, 6) }));
+                        }
+                      }}
+                      className="h-7 w-9 cursor-pointer rounded border border-slate-300 bg-transparent dark:border-slate-600"
+                    />
+                    <span className="text-slate-500">Pick a color</span>
+                  </label>
                 </div>
               </div>
 

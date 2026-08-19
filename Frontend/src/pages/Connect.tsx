@@ -36,7 +36,6 @@ export function Connect() {
   const { isAuthenticated, loading: authLoading } = useUserAuth();
   const [platforms, setPlatforms] = React.useState<Platform[]>([]);
   const [busy, setBusy] = React.useState<string | null>(null);
-  const [loading, setLoading] = React.useState(true);
   const [devMode, setDevMode] = React.useState(false);
   const [waForm, setWaForm] = React.useState({
     open: false,
@@ -90,8 +89,6 @@ export function Connect() {
         setPlatforms(platformList);
       } catch {
         setPlatforms([...ALL_PLATFORMS]);
-      } finally {
-        setLoading(false);
       }
     }
     fetchAccounts();

@@ -2,6 +2,7 @@ import type { AIProviderCategory } from '../../../types.js'
 
 export interface TranscribeOptions {
   responseFormat?: 'json' | 'text'
+  durationMs?: number
 }
 
 export interface TranscribeResult {
@@ -17,6 +18,7 @@ export interface ChatMessage {
 export interface ChatOptions {
   json?: boolean
   temperature?: number
+  phone?: string
 }
 
 export interface ChatResult {

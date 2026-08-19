@@ -1,4 +1,5 @@
 import { boolean, integer, jsonb, pgTable, text, uniqueIndex, index } from 'drizzle-orm/pg-core'
+import { sql } from 'drizzle-orm'
 
 export const posts = pgTable('posts', {
   id: text('id').primaryKey(),
@@ -7,6 +8,9 @@ export const posts = pgTable('posts', {
   createdAt: text('created_at').notNull(),
   updatedAt: text('updated_at').notNull(),
   data: jsonb('data').notNull().default({}),
+  tokensCharged: integer('tokens_charged').notNull().default(0),
+  tokensChargedAction: text('tokens_charged_action'),
+  refundedAt: text('refunded_at'),
 }, (table) => [
   index('idx_posts_phone').on(table.phone),
   index('idx_posts_stage').on(table.stage),
@@ -126,10 +130,12 @@ export const tokenTransactions = pgTable('token_transactions', {
   description: text('description').notNull(),
   postId: text('post_id'),
   adminId: text('admin_id'),
+  operationId: text('operation_id'),
   createdAt: text('created_at').notNull(),
 }, (table) => [
   index('idx_token_tx_phone').on(table.phone, table.createdAt),
   index('idx_token_tx_type').on(table.type),
+  uniqueIndex('idx_token_tx_operation_id').on(table.operationId),
 ])
 
 export const socialAccounts = pgTable('social_accounts', {
@@ -209,13 +215,20 @@ export const adCampaigns = pgTable('ad_campaigns', {
   adContent: jsonb('ad_content').notNull(),
   targeting: jsonb('targeting').notNull(),
   budgetCents: integer('budget_cents').notNull(),
+  budgetType: text('budget_type').notNull().default('daily'),
+  currency: text('currency').notNull().default('USD'),
+  startDate: text('start_date'),
+  endDate: text('end_date'),
   campaignId: text('campaign_id'),
   adSetId: text('ad_set_id'),
   adId: text('ad_id'),
+  creativeId: text('creative_id'),
   imageUrl: text('image_url'),
   publishAt: text('publish_at'),
   createdAt: text('created_at').notNull(),
   updatedAt: text('updated_at').notNull(),
+  chargedTokens: integer('charged_tokens').notNull().default(0),
+  chargedAt: text('charged_at'),
 }, (table) => [
   index('idx_ad_campaigns_phone').on(table.phone),
   index('idx_ad_campaigns_status').on(table.status),
@@ -255,11 +268,17 @@ export const aiUsageLogs = pgTable('ai_usage_logs', {
   success: boolean('success').notNull().default(true),
   error: text('error'),
   createdAt: text('created_at').notNull(),
+  audioSeconds: integer('audio_seconds').notNull().default(0),
+  imageCount: integer('image_count').notNull().default(0),
+  pricingVersionId: text('pricing_version_id'),
+  unpriced: boolean('unpriced').notNull().default(false),
+  cachedInputTokens: integer('cached_input_tokens').notNull().default(0),
 }, (table) => [
   index('idx_ai_usage_provider').on(table.providerId),
   index('idx_ai_usage_category').on(table.category),
   index('idx_ai_usage_created').on(table.createdAt),
   index('idx_ai_usage_phone').on(table.phone),
+  index('idx_ai_usage_pricing_version').on(table.pricingVersionId),
 ])
 
 export const aiProviderCosts = pgTable('ai_provider_costs', {
@@ -274,6 +293,32 @@ export const aiProviderCosts = pgTable('ai_provider_costs', {
 }, (table) => [
   index('idx_ai_costs_provider').on(table.provider),
   uniqueIndex('idx_ai_costs_provider_category').on(table.provider, table.category),
+])
+
+export const aiProviderCostVersions = pgTable('ai_provider_cost_versions', {
+  id: text('id').primaryKey(),
+  provider: text('provider').notNull(),
+  category: text('category').notNull(),
+  version: integer('version').notNull(),
+  inputRate: integer('input_rate').notNull().default(0),
+  outputRate: integer('output_rate').notNull().default(0),
+  cachedInputRate: integer('cached_input_rate').notNull().default(0),
+  imageRate: integer('image_rate').notNull().default(0),
+  audioRate: integer('audio_rate').notNull().default(0),
+  effectiveFrom: text('effective_from').notNull(),
+  effectiveUntil: text('effective_until'),
+  source: text('source').notNull().default('seed'),
+  lastVerifiedAt: text('last_verified_at'),
+  active: boolean('active').notNull().default(true),
+  status: text('status').notNull().default('pending'),
+  createdAt: text('created_at').notNull(),
+  updatedAt: text('updated_at').notNull(),
+}, (table) => [
+  index('idx_ai_cost_versions_provider').on(table.provider),
+  index('idx_ai_cost_versions_active').on(table.active),
+  index('idx_ai_cost_versions_status').on(table.status),
+  uniqueIndex('idx_ai_cost_versions_provider_category_version').on(table.provider, table.category, table.version),
+  uniqueIndex('idx_ai_cost_versions_one_active').on(table.provider, table.category).where(sql`active`),
 ])
 
 // ---- Meta Platform Tables ----
@@ -367,4 +412,40 @@ export const scheduledPosts = pgTable('scheduled_posts', {
   index('idx_scheduled_publish_at').on(table.publishAt),
   index('idx_scheduled_status').on(table.status),
   index('idx_scheduled_phone').on(table.phone),
+])
+
+// ---- Notifications ----
+
+export const notifications = pgTable('notifications', {
+  id: text('id').primaryKey(),
+  targetType: text('target_type').notNull().default('admin'),
+  targetPhone: text('target_phone'),
+  category: text('category').notNull().default('system'),
+  title: text('title').notNull(),
+  body: text('body').notNull(),
+  data: jsonb('data').notNull().default({}),
+  isRead: boolean('is_read').notNull().default(false),
+  createdAt: text('created_at').notNull(),
+}, (table) => [
+  index('idx_notifications_target').on(table.targetType, table.targetPhone),
+  index('idx_notifications_read').on(table.isRead),
+  index('idx_notifications_created').on(table.createdAt),
+])
+
+// ---- Error Logs ----
+
+export const errorLogs = pgTable('error_logs', {
+  id: text('id').primaryKey(),
+  source: text('source').notNull().default('app'),
+  message: text('message').notNull(),
+  stack: text('stack'),
+  details: jsonb('details').notNull().default({}),
+  resolved: boolean('resolved').notNull().default(false),
+  resolvedAt: text('resolved_at'),
+  lastSeenAt: text('last_seen_at').notNull(),
+  createdAt: text('created_at').notNull(),
+}, (table) => [
+  index('idx_error_logs_created').on(table.createdAt),
+  index('idx_error_logs_source').on(table.source),
+  index('idx_error_logs_resolved').on(table.resolved),
 ])

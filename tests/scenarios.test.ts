@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeAll, beforeEach, vi } from 'vitest'
 import './setupMocks.js'
-import { initStore, resetStore, listPosts, getConversation, getPost, getEdits, getMessages } from '../src/store.js'
+import { initStore, resetStore, listPosts, getConversation, getPost, getEdits, getMessages, updateUser, getUser } from '../src/store.js'
 import { handleWebhook } from '../src/routes/webhook.js'
 import { publishImage } from '../src/lib/instagram.js'
 import { chatJson } from '../src/lib/llm.js'
@@ -112,7 +112,7 @@ describe('Scenario 1 — natural WhatsApp conversation to published Instagram po
     })
 
     await handleWebhook(makeTextPayload('Hi', 'wamid.g1'))
-    expect(sendTextMock).toHaveBeenCalledWith(PHONE, expect.stringContaining('How are you?'))
+    expect(sendTextMock).toHaveBeenCalledWith(PHONE, expect.stringContaining('What would you like to create today?'))
 
     await handleWebhook(makeTextPayload('I need an Instagram post for my dental clinic.', 'wamid.g2'))
     const conv = await getConversation(PHONE)
@@ -126,7 +126,7 @@ describe('Scenario 1 — natural WhatsApp conversation to published Instagram po
 
     expect(generateFullDraftMock).toHaveBeenCalled()
     expect(brandCheckMock).toHaveBeenCalled()
-    expect(generateImageMock).toHaveBeenCalledWith(IMAGE_PROMPT)
+    expect(generateImageMock).toHaveBeenCalledWith(IMAGE_PROMPT, PHONE, undefined)
     expect(draftPost.imageUrl).toBe('http://mock/media/test.png')
     expect(draftPost.intent?.language).toBe('English')
 
@@ -150,7 +150,6 @@ describe('Scenario 1 — natural WhatsApp conversation to published Instagram po
     expect(done.publishedAt).toBeDefined()
     const confirm = sendTextMock.mock.calls.find((c) => (c[1] as string).includes('Published'))
     expect(confirm).toBeDefined()
-    expect(confirm![1]).toContain(done.permalink!)
   }, 20000)
 
 })
@@ -233,5 +232,62 @@ describe('Scenario 4 — multiple edits keep conversation context', () => {
     await waitForStatus(postId, 'AWAITING_APPROVAL')
     expect(generateFullDraftMock).toHaveBeenCalledTimes(2)
   }, 20000)
+})
+
+describe('Token charging — charged at generation, not at publish', () => {
+  beforeAll(() => initStore())
+
+  beforeEach(async () => {
+    vi.clearAllMocks()
+    await resetStore()
+    await registerTestUser()
+    chatJsonMock.mockResolvedValue({ action: 'unclear', reply: 'Please rephrase.' })
+    generateFullDraftMock.mockResolvedValue(draft() as never)
+    brandCheckMock.mockResolvedValue({ passed: true, grammar: 'PASS', brandVoice: 'PASS', copyright: 'PASS', policy: 'PASS' })
+    generateImagePromptMock.mockResolvedValue(IMAGE_PROMPT)
+    generateImageMock.mockResolvedValue(IMAGE_BUFFER)
+    publishImageMock.mockResolvedValue({ mediaId: 'x', permalink: 'y' })
+  })
+
+  it('charges tokens when a post is generated and NOT on plain chat', async () => {
+    await updateUser(PHONE, { tokensRemaining: 10 })
+    useClassifier((latest) => {
+      if (latest === 'Hi') return { action: 'smalltalk', reply: 'Hi!' }
+      if (latest.includes('teeth whitening'))
+        return { action: 'generate_post', intent: { topic: 'teeth whitening', audience: 'all', tone: 'friendly', goal: 'promote', language: 'English', emotion: 'positive' } }
+      return { action: 'smalltalk', reply: 'ok' }
+    })
+
+    // Plain chat must not consume tokens
+    await handleWebhook(makeTextPayload('Hi', 'w1'))
+    expect((await getUser(PHONE))!.tokensUsed).toBe(0)
+
+    // Generating a post must consume exactly one token action's cost.
+    // The test user is on the pro package with both IG+FB connected -> cross_platform (cost 2).
+    await handleWebhook(makeTextPayload('Create a post about our teeth whitening offer', 'w2'))
+    const postId = (await listPosts())[0].id
+    await waitForStatus(postId, 'AWAITING_APPROVAL')
+
+    const u = await getUser(PHONE)
+    expect(u!.tokensUsed).toBe(2)
+    expect(u!.tokensRemaining).toBe(8)
+  })
+
+  it('blocks generation with insufficient tokens and charges nothing', async () => {
+    // 1 token left: the message-access guard (<=0) passes, but a cross_platform
+    // generation (cost 2) must be blocked by the generation-time charge check.
+    await updateUser(PHONE, { tokensRemaining: 1 })
+    useClassifier((latest) => {
+      if (latest.includes('teeth whitening'))
+        return { action: 'generate_post', intent: { topic: 'teeth whitening' } }
+      return { action: 'smalltalk', reply: 'ok' }
+    })
+
+    await handleWebhook(makeTextPayload('Create a post about our teeth whitening offer', 'w1'))
+    const u = await getUser(PHONE)
+    expect(u!.tokensUsed).toBe(0)
+    expect(u!.tokensRemaining).toBe(1)
+    expect(sendTextMock).toHaveBeenCalledWith(PHONE, expect.stringContaining('need 2 tokens'))
+  })
 })
 

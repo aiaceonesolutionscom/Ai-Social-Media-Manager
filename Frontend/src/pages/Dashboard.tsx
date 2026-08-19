@@ -1,7 +1,7 @@
 import React from 'react';
 import { useNavigate } from 'react-router-dom';
 import {
-  BookOpenIcon, CalendarIcon, CoinsIcon, ExternalLinkIcon, FileTextIcon, MessageCircleIcon, SendIcon, SparklesIcon, XIcon
+  BookOpenIcon, CoinsIcon, ExternalLinkIcon, FileTextIcon, InstagramIcon, FacebookIcon, MegaphoneIcon, MessageCircleIcon, SparklesIcon, XIcon
 } from 'lucide-react';
 import { DashboardLayout } from '../components/layout/DashboardLayout';
 import { StatsCard } from '../components/ui/StatsCard';
@@ -17,14 +17,22 @@ import { apiRequest, endpoints } from '../utils/api';
 import { useUserAuth } from '../contexts/UserAuthContext';
 import type { Post } from '../types';
 import { formatDate } from '../utils/format';
+import { cn } from '../utils/cn';
 
 const fallbackPosts: Post[] = [];
+
+type PlatformFilter = 'all' | 'instagram' | 'facebook';
 
 export function Dashboard() {
   const navigate = useNavigate();
   const { user, isAuthenticated, loading: authLoading, endPackage } = useUserAuth();
   const [posts, setPosts] = React.useState<Post[]>(fallbackPosts);
   const [platforms, setPlatforms] = React.useState<Array<{ id: string; name: string; status: string; account?: string }>>([]);
+  const [accounts, setAccounts] = React.useState<any[]>([]);
+  const [whatsappNumber, setWhatsappNumber] = React.useState('');
+  const [features, setFeatures] = React.useState<Record<string, boolean>>({});
+  const [metaAdsCount, setMetaAdsCount] = React.useState(0);
+  const [platformFilter, setPlatformFilter] = React.useState<PlatformFilter>('all');
   const [tokens, setTokens] = React.useState(0);
   const [totalTokens, setTotalTokens] = React.useState(0);
   const [loading, setLoading] = React.useState(true);
@@ -47,6 +55,28 @@ export function Dashboard() {
     }
   };
 
+  const whatsappConnected = accounts.some((a) => a.platform === 'whatsapp' && (a.status === 'active' || a.status === 'connected'));
+
+  const whatsappChatTitle = !whatsappNumber
+    ? 'WhatsApp number is not configured by the admin'
+    : !whatsappConnected
+      ? 'Connect your WhatsApp first'
+      : 'Open the bot chat on WhatsApp';
+
+  const openWhatsAppChat = () => {
+    if (!whatsappConnected) {
+      notify.info('Please connect your WhatsApp number first.');
+      navigate('/connect');
+      return;
+    }
+    if (!whatsappNumber) {
+      notify.error('WhatsApp number is not configured yet.');
+      return;
+    }
+    const digits = whatsappNumber.replace(/\D/g, '');
+    window.open(`https://wa.me/${digits}`, '_blank', 'noopener,noreferrer');
+  };
+
   React.useEffect(() => {
     if (authLoading) return;
     if (!isAuthenticated) return;
@@ -60,19 +90,25 @@ export function Dashboard() {
             id: p.id,
             date: p.createdAt?.split('T')[0] || '',
             caption: p.content?.caption || p.transcript || 'Draft post',
-            platform: 'instagram' as const,
-            status: p.status === 'DONE' ? 'published' : p.status === 'FAILED' ? 'failed' : 'draft',
+            platform: ((p.platforms && p.platforms[0]) || 'instagram') as 'instagram' | 'facebook',
+            status: p.status === 'DONE' ? 'published' : p.status === 'FAILED' ? 'failed' : p.scheduledAt ? 'scheduled' : 'draft',
             tokens: 1,
           })));
         }
 
         // Fetch connected social accounts and package features
-        const [accounts, pkgData] = await Promise.all([
+        const [accounts, pkgData, metaData, adsData] = await Promise.all([
           apiRequest<any[]>(endpoints.socialAccounts).catch(() => []),
           apiRequest<{ features: Record<string, boolean> }>(endpoints.userPackage).catch(() => ({ features: {} })),
+          apiRequest<{ whatsapp?: { number?: string } }>(endpoints.meta).catch(() => ({}) as { whatsapp?: { number?: string } }),
+          apiRequest<{ campaigns: any[] }>(endpoints.ads).catch(() => ({ campaigns: [] }) as { campaigns: any[] }),
         ]);
+        setAccounts(accounts);
+        setWhatsappNumber(metaData?.whatsapp?.number || '');
+        setMetaAdsCount(adsData.campaigns?.length || 0);
 
         const features: Record<string, boolean> = (pkgData.features || {}) as Record<string, boolean>;
+        setFeatures(features);
         const hasAnyFeature = Object.keys(features).length > 0;
 
         // Platform-feature mapping
@@ -121,6 +157,20 @@ export function Dashboard() {
       setTotalTokens(user.tokensRemaining + user.tokensUsed);
     }
   }, [user]);
+
+  const hasFeature = (key: string): boolean => {
+    if (Object.keys(features).length === 0) return true;
+    return features[key] === true;
+  };
+
+  const showInstagram = hasFeature('instagram_publishing');
+  const showFacebook = hasFeature('facebook_publishing');
+  const showMetaAds = hasFeature('ad_campaigns');
+
+  const filteredPosts = React.useMemo(() => {
+    if (platformFilter === 'all') return posts;
+    return posts.filter((p) => p.platform === platformFilter);
+  }, [posts, platformFilter]);
 
   const columns: Array<Column<Post>> = [
     { key: 'date', header: 'Date', render: (p) => <span className="whitespace-nowrap">{formatDate(p.date)}</span> },
@@ -265,9 +315,18 @@ export function Dashboard() {
       <div className="grid gap-6 sm:grid-cols-2 xl:grid-cols-4">
         <StatsCard label="Tokens remaining" value={`${tokens} / ${totalTokens}`} icon={CoinsIcon} tone="amber"
           progress={{ value: tokens, max: totalTokens }} index={0} />
-        <StatsCard label="Total posts" value={String(posts.length)} icon={FileTextIcon} tone="indigo" index={1} />
-        <StatsCard label="Published" value={String(posts.filter(p => p.status === 'published').length)} icon={SendIcon} tone="emerald" index={2} />
-        <StatsCard label="This month" value={String(posts.length)} icon={CalendarIcon} tone="slate" index={3} />
+        {showInstagram && (
+          <StatsCard label="Instagram posts" value={String(posts.filter(p => p.platform === 'instagram').length)} icon={InstagramIcon} tone="indigo" index={1} />
+        )}
+        {showFacebook && (
+          <StatsCard label="Facebook posts" value={String(posts.filter(p => p.platform === 'facebook').length)} icon={FacebookIcon} tone="emerald" index={2} />
+        )}
+        {showMetaAds && (
+          <StatsCard label="Meta Ads" value={String(metaAdsCount)} icon={MegaphoneIcon} tone="slate" index={3} />
+        )}
+        {!showInstagram && !showFacebook && (
+          <StatsCard label="Total posts" value={String(posts.length)} icon={FileTextIcon} tone="indigo" index={1} />
+        )}
       </div>
 
       <div className="mt-6">
@@ -322,6 +381,11 @@ export function Dashboard() {
             <Button variant="secondary" fullWidth onClick={() => navigate('/connect')}>
               <ExternalLinkIcon className="h-4 w-4" aria-hidden="true" /> Connect platforms
             </Button>
+            <Button variant="secondary" fullWidth onClick={openWhatsAppChat} title={whatsappChatTitle}>
+              <svg viewBox="0 0 24 24" className="h-4 w-4" fill="currentColor" aria-hidden="true">
+                <path d="M17.472 14.382c-.297-.149-1.758-.867-2.03-.967-.273-.099-.471-.148-.67.15-.197.297-.767.966-.94 1.164-.173.199-.347.223-.644.075-.297-.15-1.255-.463-2.39-1.475-.883-.788-1.48-1.761-1.653-2.059-.173-.297-.018-.458.13-.606.134-.133.298-.347.446-.52.149-.174.198-.298.298-.497.099-.198.05-.371-.025-.52-.075-.149-.669-1.612-.916-2.207-.242-.579-.487-.5-.669-.51-.173-.008-.371-.01-.57-.01-.198 0-.52.074-.792.372-.272.297-1.04 1.016-1.04 2.479 0 1.462 1.065 2.875 1.213 3.074.149.198 2.096 3.2 5.077 4.487.709.306 1.262.489 1.694.625.712.227 1.36.195 1.871.118.571-.085 1.758-.719 2.006-1.413.248-.694.248-1.289.173-1.413-.074-.124-.272-.198-.57-.347m-5.421 7.403h-.004a9.87 9.87 0 0 1-5.031-1.378l-.361-.214-3.741.982.998-3.648-.235-.374a9.86 9.86 0 0 1-1.51-5.26c.001-5.45 4.436-9.884 9.888-9.884 2.64 0 5.122 1.03 6.988 2.898a9.825 9.825 0 0 1 2.893 6.994c-.003 5.45-4.437 9.884-9.885 9.884m8.413-18.297A11.815 11.815 0 0 0 12.05 0C5.495 0 .16 5.335.157 11.892c0 2.096.547 4.142 1.588 5.945L.057 24l6.305-1.654a11.882 11.882 0 0 0 5.683 1.448h.005c6.554 0 11.89-5.335 11.893-11.893a11.821 11.821 0 0 0-3.48-8.413Z"/>
+              </svg> WhatsApp Chat
+            </Button>
           </div>
         </Card>
       </div>
@@ -329,13 +393,36 @@ export function Dashboard() {
       <section className="mt-6" aria-labelledby="recent-posts-heading">
         <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
           <h2 id="recent-posts-heading" className="text-lg font-bold text-slate-900 dark:text-slate-50">Recent posts</h2>
+          {(showInstagram || showFacebook) && (
+            <div className="flex items-center gap-1 rounded-lg border border-slate-200 p-1 dark:border-slate-700">
+              {([
+                { id: 'all' as PlatformFilter, label: 'All' },
+                ...(showInstagram ? [{ id: 'instagram' as PlatformFilter, label: 'Instagram' }] : []),
+                ...(showFacebook ? [{ id: 'facebook' as PlatformFilter, label: 'Facebook' }] : []),
+              ]).map((opt) => (
+                <button
+                  key={opt.id}
+                  type="button"
+                  onClick={() => setPlatformFilter(opt.id)}
+                  className={cn(
+                    'rounded-md px-3 py-1 text-xs font-semibold transition-colors',
+                    platformFilter === opt.id
+                      ? 'bg-indigo-600 text-white'
+                      : 'text-slate-600 hover:bg-slate-100 dark:text-slate-300 dark:hover:bg-slate-800',
+                  )}
+                >
+                  {opt.label}
+                </button>
+              ))}
+            </div>
+          )}
         </div>
         {loading ? (
           <div className="space-y-4">
             {[1,2,3].map(i => <div key={i} className="h-16 rounded-xl bg-slate-100 animate-pulse" />)}
           </div>
         ) : (
-          <DataTable columns={columns} rows={posts} rowKey={(p) => p.id} caption="Your most recent posts"
+          <DataTable columns={columns} rows={filteredPosts} rowKey={(p) => p.id} caption="Your most recent posts"
             emptyMessage="No posts yet — send a voice note on WhatsApp to get started!" />
         )}
       </section>

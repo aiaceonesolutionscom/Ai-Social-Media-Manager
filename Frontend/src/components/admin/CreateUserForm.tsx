@@ -1,4 +1,4 @@
-import React from 'react';
+
 import { useForm } from 'react-hook-form';
 import { zodResolver } from '@hookform/resolvers/zod';
 import { z } from 'zod';
@@ -25,7 +25,6 @@ export function CreateUserForm({ packages, onSubmit, onCancel }: CreateUserFormP
   const {
     register,
     handleSubmit,
-    watch,
     formState: { errors, isSubmitting }
   } = useForm<CreateUserFormValues>({
     resolver: zodResolver(schema),
@@ -37,8 +36,6 @@ export function CreateUserForm({ packages, onSubmit, onCancel }: CreateUserFormP
       tokens: 0,
     }
   });
-
-  const selectedPackage = watch('packageId');
 
   return (
     <form onSubmit={handleSubmit(onSubmit)} className="space-y-5" noValidate>

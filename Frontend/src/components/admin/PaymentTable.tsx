@@ -1,4 +1,4 @@
-import React from 'react';
+
 import { CheckIcon, ReceiptIcon, RotateCcwIcon, ShieldAlertIcon } from 'lucide-react';
 import type { Payment, PaymentStatus } from '../../types';
 import { DataTable, type Column } from '../ui/DataTable';

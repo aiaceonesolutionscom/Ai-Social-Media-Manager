@@ -1,4 +1,4 @@
-import React from 'react';
+
 import { Link } from 'react-router-dom';
 import { GithubIcon, InstagramIcon, LinkedinIcon, TwitterIcon } from 'lucide-react';
 import { Logo } from './Logo';

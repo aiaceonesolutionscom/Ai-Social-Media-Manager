@@ -1,59 +1,35 @@
 import { logger } from '../lib/logger.js'
-import { sendImage, sendReplyButtons, sendText } from '../lib/whatsapp.js'
+import { sendImage, sendReplyButtons, sendText, localFileUrl } from '../lib/whatsapp.js'
+import { detectLanguage } from '../lib/language.js'
 import { generateImage } from '../lib/image.js'
 import { saveImageBuffer } from '../storage.js'
-import { localFileUrl } from '../lib/whatsapp.js'
 import { generateAdContent, generateAdTargeting, suggestAdObjective } from './adGenerate.js'
-import { createAdCampaign, updateAdCampaign, getAdCampaign, getUser, getPackage, setConversation, getConversation, resolveUserPhone, getAccountByPlatform } from '../store.js'
-import { createCampaign, createAdSet, createAdCreative, createAd, boostPost } from '../lib/metaAds.js'
-import { deductTokens, getTokenCost } from '../lib/tokens.js'
-import { parseScheduleTime } from './publish.js'
-import type { AdCampaign, AdContent, AdTargeting, ConversationState, Intent } from '../types.js'
+import { isValidImageUrl } from '../lib/urlAnalyzer.js'
+import {
+  createAdCampaign,
+  updateAdCampaign,
+  getAdCampaign,
+  getUser,
+  getPackage,
+  setConversation,
+  resolveUserPhone,
+  getAccountByPlatform,
+} from '../store.js'
+import { launchMetaAd, setMetaCampaignStatus } from '../lib/metaAds.js'
+import { buildMetaTargeting } from '../lib/adTargeting.js'
+import { getTokenCost } from '../lib/tokens.js'
+import { config } from '../config.js'
+import { refundTokens } from '../lib/tokens.js'
+import type { AdConversationData, ConversationState, Intent } from '../types.js'
 
-interface AdConversationState {
-  kind: 'ad_idle' | 'ad_gathering' | 'ad_generating' | 'ad_preview' | 'ad_creating'
-  campaignId?: string
-  step?: string
-  data?: {
-    topic?: string
-    intent?: Intent
-    budget?: number
-    websiteUrl?: string
-  }
+export interface AdValidationError extends Error {
+  code: 'NO_ACCOUNT' | 'NO_WEBSITE' | 'NO_PAGE' | 'NO_IMAGE' | 'INVALID_BUDGET' | 'INVALID_DATES'
 }
 
-const AD_GATHERING_QUESTIONS: Record<string, string> = {
-  topic: "What would you like to advertise? (e.g., your clinic, a product, a service)",
-  website: "Do you have a website URL? (Type 'skip' if none)",
-  budget: "What's your daily budget in dollars? (e.g., 10, 25, 50)",
-}
-
-export async function handleAdConversation(
-  phone: string,
-  content: string,
-  convState: AdConversationState,
-): Promise<void> {
-  const pi = await getPackageInfo(phone)
-
-  if (!pi.hasAdCampaigns) {
-    await sendText(phone, '❌ Meta Ads is not included in your current plan. Please upgrade your package to use this feature.\n\nYou can check available packages by saying "show packages" or visit your dashboard.')
-    return
-  }
-
-  if (convState.kind === 'ad_gathering') {
-    await handleAdGathering(phone, content, convState)
-    return
-  }
-
-  if (convState.kind === 'ad_preview') {
-    await handleAdPreview(phone, content, convState)
-    return
-  }
-
-  if (convState.kind === 'ad_creating') {
-    await sendText(phone, '⏳ Your ad campaign is being created. Please wait...')
-    return
-  }
+export function createAdError(code: AdValidationError['code'], message: string): AdValidationError {
+  const err = new Error(message) as AdValidationError
+  err.code = code
+  return err
 }
 
 async function getPackageInfo(phone: string) {
@@ -61,147 +37,158 @@ async function getPackageInfo(phone: string) {
   const user = await getUser(userPhone)
   const pkg = user?.packageId ? await getPackage(user.packageId) : null
   const features = (pkg?.features || {}) as Record<string, boolean>
-  return { hasAdCampaigns: features.ad_campaigns === true }
+  return { hasAdCampaigns: features.ad_campaigns === true, userPhone }
 }
 
-async function handleAdGathering(phone: string, content: string, convState: AdConversationState): Promise<void> {
-  const data = convState.data || {}
-  const step = convState.step || 'topic'
+const MIN_DAILY_BUDGET_CENTS = 100 // $1/day minimum
+const MIN_LIFETIME_BUDGET_CENTS = 100
 
-  if (step === 'topic') {
-    data.topic = content
-    await setConversation(phone, { kind: 'ad_gathering', postId: convState.campaignId || crypto.randomUUID(), step: 'website', data } as ConversationState)
-    await sendText(phone, AD_GATHERING_QUESTIONS.website)
-    return
-  }
+export function validateBudget(adData: AdConversationData): { budgetCents: number; budgetType: 'daily' | 'total'; currency: string; error?: string } {
+  const budget = adData.budget || 0
+  const budgetType = adData.budgetType || 'daily'
+  const currency = (adData.currency || 'USD').toUpperCase()
+  const budgetCents = Math.round(budget * 100)
 
-  if (step === 'website') {
-    data.websiteUrl = content.toLowerCase() === 'skip' ? undefined : content
-    await setConversation(phone, { kind: 'ad_gathering', postId: convState.campaignId || crypto.randomUUID(), step: 'budget', data } as ConversationState)
-    await sendText(phone, AD_GATHERING_QUESTIONS.budget)
-    return
+  if (!budget || budgetCents <= 0) {
+    return { budgetCents, budgetType, currency, error: 'Budget must be greater than 0.' }
   }
-
-  if (step === 'budget') {
-    const budget = parseInt(content.replace(/[^0-9]/g, ''), 10)
-    if (isNaN(budget) || budget < 1) {
-      await sendText(phone, 'Please enter a valid budget amount (minimum $1/day).')
-      return
-    }
-    data.budget = budget
-    await generateAndPreviewAd(phone, data, convState)
-    return
+  const min = budgetType === 'total' ? MIN_LIFETIME_BUDGET_CENTS : MIN_DAILY_BUDGET_CENTS
+  if (budgetCents < min) {
+    return { budgetCents, budgetType, currency, error: `Budget is below Meta's minimum (${min / 100} ${currency}/day).` }
   }
+  return { budgetCents, budgetType, currency }
 }
 
-function looksLikeScheduleRequest(text: string): boolean {
-  return /\b(schedule|scheduling|later|tomorrow|tonight|kal|today at|in \d+ (min|minute|minutes|hour|hours|hr|hrs|day|days)|at \d|\d{1,2}(?::\d{2})?\s*(am|pm|a\.m\.|p\.m\.))\b/i.test(text)
+export function validateScheduleDates(adData: AdConversationData): { startDate: string; endDate?: string; error?: string } {
+  const startDate = adData.startDate ? new Date(adData.startDate).toISOString().split('T')[0] : new Date().toISOString().split('T')[0]
+  let endDate: string | undefined
+  if (adData.endDate) {
+    const end = new Date(adData.endDate)
+    const start = new Date(startDate)
+    if (Number.isNaN(end.getTime())) return { startDate, error: 'Invalid end date.' }
+    if (end <= start) return { startDate, error: 'End date must be after the start date.' }
+    endDate = end.toISOString().split('T')[0]
+  }
+  return { startDate, endDate }
 }
 
-async function handleAdPreview(phone: string, content: string, convState: AdConversationState): Promise<void> {
-  const lower = content.toLowerCase().trim()
-
-  // Scheduling: "schedule for tomorrow 5pm", "kal 5 baje", "in 2 hours", etc.
-  if (looksLikeScheduleRequest(lower)) {
-    const iso = parseScheduleTime(lower)
-    if (iso) {
-      const campaignId = convState.campaignId
-      if (!campaignId) {
-        await sendText(phone, '❌ No ad campaign to schedule.')
-        return
-      }
-      await updateAdCampaign(campaignId, { status: 'scheduled', publishAt: iso })
-      await setConversation(phone, { kind: 'idle' })
-      await sendText(phone, `✅ Ad scheduled! Your ad campaign will launch on ${new Date(iso).toLocaleString()}.`)
-      return
-    }
-    await sendText(phone, '🕐 Sure! What time should the ad launch? For example: "tomorrow at 5pm", "in 2 hours", or "6:00 PM".')
-    return
-  }
-
-  if (lower === 'approve' || lower === 'yes' || lower === 'publish') {
-    await createAdCampaignOnMeta(phone, convState)
-    return
-  }
-
-  if (lower === 'edit' || lower === 'change') {
-    await sendText(phone, '✏️ What would you like to change?\n• Headline\n• Text\n• Targeting\n• Budget\n• Image')
-    const campaignId = convState.campaignId || crypto.randomUUID()
-    await setConversation(phone, { kind: 'ad_gathering', postId: campaignId, step: 'edit', data: convState.data || {} } as ConversationState)
-    return
-  }
-
-  if (lower === 'cancel') {
-    await sendText(phone, '❌ Ad campaign cancelled.')
-    await setConversation(phone, { kind: 'idle' })
-    return
-  }
-
-  await sendText(phone, 'Please reply: Approve, Edit, or Cancel')
+function moneyLabel(amount: number, currency: string): string {
+  return new Intl.NumberFormat('en-US', { style: 'currency', currency, minimumFractionDigits: 0, maximumFractionDigits: 2 }).format(amount)
 }
 
-async function generateAndPreviewAd(
+// Generate ad preview using structured AdConversationData.
+// Called from conversation.ts when all required ad fields are collected.
+export async function generateAndPreviewAd(
   phone: string,
-  data: { topic?: string; budget?: number; websiteUrl?: string; intent?: Intent },
-  convState: AdConversationState,
+  adData: AdConversationData,
+  convState: any,
 ): Promise<void> {
-  await setConversation(phone, { kind: 'generating', postId: convState.campaignId || '' })
-  await sendText(phone, '🎨 Generating your ad content...')
+  const pi = await getPackageInfo(phone)
+  if (!pi.hasAdCampaigns) {
+    await sendText(phone, '❌ Meta Ads is not included in your current plan. Please upgrade your package to use this feature.')
+    return
+  }
+
+  // Validate budget / dates up front — never silently convert to a default.
+  const budgetCheck = validateBudget(adData)
+  if (budgetCheck.error) {
+    await sendText(phone, `❌ ${budgetCheck.error}`)
+    return
+  }
+  const dateCheck = validateScheduleDates(adData)
+  if (dateCheck.error) {
+    await sendText(phone, `❌ ${dateCheck.error}`)
+    return
+  }
+  // A website URL is mandatory — without it Meta rejects the creative.
+  if (!adData.websiteUrl) {
+    await setConversation(phone, { kind: 'ad_gathering', postId: adData.existingPostId || '', step: 'website', data: {}, adData } as any)
+    await askMissingAdField(phone, adData, 'website')
+    return
+  }
+
+  const postId = adData.existingPostId || convState.postId || ''
+  await setConversation(phone, { kind: 'generating', postId } as ConversationState)
+
+  const lang = detectLanguage(adData.product || '')
+  const generatingMsg = lang === 'ur' ? '🎨 Aapka ad bana raha hoon...' : lang === 'hi' ? '🎨 Aapka ad bana raha hoon...' : '🎨 Generating your ad content...'
+  await sendText(phone, generatingMsg)
 
   try {
-    const topic = data.topic || 'social media post'
+    const topic = adData.product || 'social media post'
     const intent: Intent = {
       topic,
-      audience: 'general audience',
+      audience: adData.audience || 'general audience',
       tone: 'professional',
       goal: 'promote business',
-      language: 'English',
+      language: detectLanguage(topic),
       emotion: 'trustworthy',
     }
 
     // Generate ad content and targeting in parallel
     const [adContent, targeting, objective] = await Promise.all([
       generateAdContent(topic, intent),
-      generateAdTargeting(topic, intent.audience),
+      generateAdTargeting(topic, intent.audience, adData.location),
       suggestAdObjective(topic, intent.goal),
     ])
 
-    // Generate image
-    const imagePrompt = `Professional social media ad image for ${topic}. Clean, modern design with vibrant colors. No text in the image.`
-    const imageBuffer = await generateImage(imagePrompt)
-    const relPath = saveImageBuffer(imageBuffer, `ad_${Date.now()}`)
-    const imageUrl = localFileUrl(relPath)
+    // Generate image (or use existing post image)
+    let imageUrl = ''
+    if (adData.existingPostId) {
+      const { getPost } = await import('../store.js')
+      const existingPost = await getPost(adData.existingPostId)
+      if (existingPost?.imageUrl) {
+        imageUrl = existingPost.imageUrl
+      }
+    }
+    if (!imageUrl) {
+      const imagePrompt = `Professional social media ad image for ${topic}. Clean, modern design with vibrant colors. No text in the image.`
+      const imageBuffer = await generateImage(imagePrompt, phone)
+      const relPath = saveImageBuffer(imageBuffer, `ad_${Date.now()}`)
+      imageUrl = localFileUrl(relPath)
+    }
 
-    // Create campaign in DB
-    const campaign = await createAdCampaign({
-      phone,
-      name: `${topic} - Ad Campaign`,
-      objective,
-      adContent,
-      targeting,
-      budgetCents: (data.budget || 10) * 100,
-      imageUrl,
-    })
+    // Reuse an existing preview campaign row if present (avoid orphan pending rows).
+    const existing = convState.kind === 'ad_preview' && convState.postId
+      ? await getAdCampaign(convState.postId)
+      : undefined
+    let campaign: any
+    if (existing) {
+      await updateAdCampaign(existing.id, {
+        objective: objective || existing.objective,
+        adContent,
+        targeting,
+        budgetCents: budgetCheck.budgetCents,
+        budgetType: budgetCheck.budgetType as 'daily' | 'total',
+        currency: budgetCheck.currency,
+        startDate: dateCheck.startDate,
+        endDate: dateCheck.endDate,
+        imageUrl,
+      })
+      campaign = await getAdCampaign(existing.id)
+    } else {
+      campaign = await createAdCampaign({
+        phone,
+        name: `${topic} - Ad Campaign`,
+        objective: objective || 'OUTCOME_ENGAGEMENT',
+        adContent,
+        targeting,
+        budgetCents: budgetCheck.budgetCents,
+        budgetType: budgetCheck.budgetType as 'daily' | 'total',
+        currency: budgetCheck.currency,
+        startDate: dateCheck.startDate,
+        endDate: dateCheck.endDate,
+        imageUrl,
+        postId: adData.existingPostId,
+      })
+    }
 
-    convState.campaignId = campaign.id
-    convState.data = data
-
-    // Send preview
-    await sendImage(phone, imageUrl, `**${adContent.headline}**\n\n${adContent.primaryText}\n\n${adContent.description}\n\nCTA: ${adContent.callToAction}`)
-
-    const targetingSummary = `🎯 **Targeting:**\n• Age: ${targeting.ageMin}-${targeting.ageMax}\n• Genders: ${targeting.genders.join(', ')}\n• Locations: ${targeting.locations.join(', ')}\n• Interests: ${targeting.interests.join(', ')}`
-
-    await sendText(phone, targetingSummary)
-    await sendText(phone, `💰 **Budget:** $${data.budget}/day\n📋 **Objective:** ${objective.replace('OUTCOME_', '')}`)
-
-    await sendText(phone, 'Would you like to approve this ad campaign?')
-    await sendReplyButtons(phone, 'Action:', [
-      { id: 'ad_approve', title: '✅ Approve' },
-      { id: 'ad_edit', title: '✏️ Edit' },
-      { id: 'ad_cancel', title: '❌ Cancel' },
-    ])
-
-    await setConversation(phone, { kind: 'ad_preview', postId: campaign.id } as any)
+    await sendPreview(phone, campaign, adContent, targeting, budgetCheck, dateCheck, objective)
+    await setConversation(phone, {
+      kind: 'ad_preview',
+      postId: campaign.id,
+      adData: { ...adData, websiteUrl: adContent.linkUrl || adData.websiteUrl },
+    } as any)
   } catch (err) {
     logger.error({ phone, error: (err as Error).message }, 'ad generation failed')
     await sendText(phone, `❌ Failed to generate ad: ${(err as Error).message}`)
@@ -209,115 +196,215 @@ async function generateAndPreviewAd(
   }
 }
 
-async function createAdCampaignOnMeta(phone: string, convState: AdConversationState): Promise<void> {
-  if (!convState.campaignId) {
-    await sendText(phone, '❌ No campaign to publish.')
-    return
+async function askMissingAdField(phone: string, adData: AdConversationData, missing: string): Promise<void> {
+  const questions: Record<string, string> = {
+    website: 'What is your website URL? (e.g. https://mybusiness.com)',
+    product: 'Sure! What product or service would you like to advertise?',
+    budget: 'Great — what daily budget would you like to use? (e.g. $5/day or $50 total)',
   }
-  await launchAdCampaign(convState.campaignId)
+  await sendText(phone, questions[missing] || `What ${missing} would you like to use?`)
 }
 
+async function sendPreview(
+  phone: string,
+  campaign: any,
+  adContent: { headline: string; primaryText: string; description: string; callToAction: string; linkUrl?: string },
+  targeting: { ageMin: number; ageMax: number; genders: string[]; locations: string[]; interests: string[] },
+  budgetCheck: { budgetCents: number; budgetType: 'daily' | 'total'; currency: string },
+  dateCheck: { startDate: string; endDate?: string },
+  objective: string,
+): Promise<void> {
+  const budgetLabel = budgetCheck.budgetType === 'total'
+    ? `${moneyLabel(budgetCheck.budgetCents / 100, budgetCheck.currency)} total`
+    : `${moneyLabel(budgetCheck.budgetCents / 100, budgetCheck.currency)}/day`
+  const lang = detectLanguage(adContent.primaryText || '')
+
+  await sendImage(phone, campaign.imageUrl || '', `**${adContent.headline}**\n\n${adContent.primaryText}\n\n${adContent.description}\n\nCTA: ${adContent.callToAction}`)
+
+  const targetingSummary = `🎯 **Targeting:**\n• Age: ${targeting.ageMin}-${targeting.ageMax}\n• Locations: ${targeting.locations.join(', ')}\n• Interests: ${targeting.interests.join(', ')}`
+  await sendText(phone, targetingSummary)
+  await sendText(phone, `💰 **Budget:** ${budgetLabel} (${budgetCheck.budgetType === 'total' ? 'lifetime' : 'daily'})\n📋 **Objective:** ${objective.replace('OUTCOME_', '')}\n🌐 **Website:** ${adContent.linkUrl || 'not set'}`)
+  await sendText(phone, `📅 **Runs:** ${dateCheck.startDate}${dateCheck.endDate ? ` → ${dateCheck.endDate}` : ''}`)
+
+  const approveMsg = lang === 'ur' || lang === 'hi' ? 'Kya aap yeh ad launch karna chahenge?' : 'Would you like to launch this ad campaign?'
+  await sendText(phone, approveMsg)
+  await sendReplyButtons(phone, 'Action:', [
+    { id: 'ad_approve', title: '✅ Approve' },
+    { id: 'ad_edit', title: '✏️ Edit' },
+    { id: 'ad_schedule', title: '📅 Schedule' },
+    { id: 'ad_cancel', title: '❌ Cancel' },
+  ])
+}
+
+// Launch ad campaign on Meta. Called from conversation.ts when user approves.
 export async function launchAdCampaign(campaignId: string): Promise<void> {
   const campaign = await getAdCampaign(campaignId)
   if (!campaign) {
     throw new Error('Campaign not found')
   }
-  if (campaign.status === 'active' || campaign.status === 'cancelled' || campaign.status === 'failed') {
+  if (campaign.status === 'active' || campaign.status === 'paused' || campaign.status === 'stopped' || campaign.status === 'cancelled' || campaign.status === 'failed') {
     return
   }
 
   const phone = campaign.phone
 
-  // Check tokens
+  // Idempotency: never double-charge tokens for the same campaign.
   const userPhone = await resolveUserPhone(phone)
   const user = await getUser(userPhone)
+
+  // In dev / no-real-account mode: mock but never charge tokens.
+  const devMode = config.dev.enabled === true
+  const userAdAccount = await getAccountByPlatform(userPhone, 'meta_ads')
+  const userFbPage = await getAccountByPlatform(userPhone, 'facebook')
+  const metaAdsToken = userAdAccount?.accessToken
+  const adAccountId = userAdAccount?.accountId
+
+  if (!adAccountId || !metaAdsToken) {
+    if (devMode) {
+      await updateAdCampaign(campaign.id, { status: 'active', campaignId: `DEV_camp_${Date.now()}`, adSetId: `DEV_adset_${Date.now()}`, adId: `DEV_ad_${Date.now()}`, creativeId: `DEV_creative_${Date.now()}` })
+      await sendText(phone, `⚠️ **DEV MODE / MOCK (not a real Meta campaign)**\n\nSimulated campaign created. No real ad spend and no tokens charged. Connect a Meta Ads account to run real campaigns.`)
+      await setConversation(phone, { kind: 'idle' })
+      return
+    }
+    await updateAdCampaign(campaign.id, { status: 'failed' })
+    await sendText(phone, '❌ No Meta Ads account is connected. Connect one in your dashboard to launch a paid campaign.')
+    await setConversation(phone, { kind: 'idle' })
+    return
+  }
+
+  // Real Meta path: charge tokens first (once), then call Meta.
   if (user) {
     const adCost = await getTokenCost('ad_campaign')
-    const canDeduct = await deductTokens(userPhone, adCost, campaign.id, 'Ad campaign creation')
-    if (!canDeduct) {
+    const { tokenEngine } = await import('../lib/TokenEngine.js')
+    const charge = await tokenEngine.chargeAdOnce(campaign.id, userPhone, adCost, 'Ad campaign creation')
+    if (!charge.success && !charge.alreadyCharged) {
       await sendText(phone, `❌ Insufficient tokens for ad campaign. Each campaign costs ${adCost} tokens.`)
       await updateAdCampaign(campaign.id, { status: 'failed' })
       return
     }
   }
 
+  // Validate creative requirements before touching Meta.
+  if (!campaign.imageUrl) {
+    await updateAdCampaign(campaign.id, { status: 'failed' })
+    await sendText(phone, '❌ Failed to create ad campaign: ad image is missing.')
+    await setConversation(phone, { kind: 'idle' })
+    return
+  }
+  if (!isValidImageUrl(campaign.imageUrl) && !campaign.imageUrl.startsWith('https://')) {
+    await updateAdCampaign(campaign.id, { status: 'failed' })
+    await sendText(phone, '❌ Failed to create ad campaign: the ad image URL is not publicly accessible for Meta.')
+    await setConversation(phone, { kind: 'idle' })
+    return
+  }
+  const linkUrl = campaign.adContent.linkUrl || campaign.adContent.callToAction ? campaign.adContent.linkUrl : undefined
+  if (!linkUrl) {
+    await updateAdCampaign(campaign.id, { status: 'failed' })
+    await sendText(phone, '❌ Failed to create ad campaign: a website URL is required. Please provide a website in the ad details.')
+    await setConversation(phone, { kind: 'idle' })
+    return
+  }
+  const pageId = userFbPage?.accountId || config.facebook.pageId || ''
+  if (!pageId) {
+    await updateAdCampaign(campaign.id, { status: 'failed' })
+    await sendText(phone, '❌ Failed to create ad campaign: a connected Facebook Page is required. Connect one in your dashboard.')
+    await setConversation(phone, { kind: 'idle' })
+    return
+  }
+
   await sendText(phone, '⏳ Creating your ad campaign on Meta...')
+  // Mark as creating so the scheduler won't double-launch.
   await updateAdCampaign(campaign.id, { status: 'creating' })
 
   try {
-    // Prefer the user's own connected Meta Ads account, fall back to platform credentials.
-    const userAdAccount = await getAccountByPlatform(userPhone, 'meta_ads')
-    const userFbPage = await getAccountByPlatform(userPhone, 'facebook')
-    const metaAdsToken = userAdAccount?.accessToken || process.env.META_ADS_ACCESS_TOKEN
-    const adAccountId = userAdAccount?.accountId || process.env.META_ADS_ACCOUNT_ID
-
-    if (!metaAdsToken || !adAccountId) {
-      if (process.env.DEV_MODE === 'true') {
-        // Mock success in dev mode
-        await updateAdCampaign(campaign.id, {
-          status: 'active',
-          campaignId: `DEV_camp_${Date.now()}`,
-          adSetId: `DEV_adset_${Date.now()}`,
-          adId: `DEV_ad_${Date.now()}`,
-        })
-        await sendText(phone, `✅ **Ad Campaign Created!** (Dev Mode)\n\nCampaign ID: DEV_camp_${Date.now()}\nStatus: Active (mocked)\n\nIn production, this would create a real Meta ad campaign.`)
-        await setConversation(phone, { kind: 'idle' })
-        return
-      }
-      throw new Error('No Meta Ads account connected. Connect one in your dashboard, or ask admin to set META_ADS_ACCESS_TOKEN and META_ADS_ACCOUNT_ID.')
-    }
-
-    // Create real campaign on the user's own ad account
-    const fbAccountId = adAccountId
-    // The ad creative must belong to a Facebook Page. Prefer the user's own connected page,
-    // fall back to the platform-level FACEBOOK_PAGE_ID.
-    const pageId = userFbPage?.accountId || process.env.FACEBOOK_PAGE_ID || ''
-
-    // Convert LLM targeting shape ({ageMin, ageMax, genders, locations, interests})
-    // into the Meta Ads API targeting spec.
     const t = campaign.targeting
-    const metaTargeting: Record<string, unknown> = {
-      age_min: t.ageMin ?? 18,
-      age_max: t.ageMax ?? 65,
-      genders: (t.genders ?? ['all']).map((g) => (g === 'male' ? 1 : g === 'female' ? 2 : 0)),
-      geo_locations: {
-        countries: Array.isArray(t.locations) ? t.locations : ['US'],
-      },
-      interests: Array.isArray(t.interests)
-        ? t.interests.slice(0, 5).map((name) => ({ name }))
-        : [],
-      publisher_platforms: ['facebook', 'instagram'],
-    }
-
-    const result = await boostPost(fbAccountId, metaAdsToken, {
-      name: campaign.name,
-      pageId,
-      imageUrl: campaign.imageUrl || '',
-      caption: campaign.adContent.primaryText,
-      budgetCents: campaign.budgetCents,
-      targeting: metaTargeting,
-      objective: campaign.objective,
+    const metaTargeting = buildMetaTargeting({
+      ageMin: t.ageMin,
+      ageMax: t.ageMax,
+      genders: t.genders,
+      locations: t.locations,
+      interests: t.interests,
     })
 
+    const startDate = campaign.startDate || new Date().toISOString().split('T')[0]
+    const result = await launchMetaAd({
+      adAccountId,
+      accessToken: metaAdsToken,
+      name: campaign.name,
+      pageId,
+      imageUrl: campaign.imageUrl,
+      primaryText: campaign.adContent.primaryText,
+      headline: campaign.adContent.headline,
+      description: campaign.adContent.description,
+      linkUrl: linkUrl,
+      callToAction: campaign.adContent.callToAction,
+      objective: campaign.objective,
+      budgetCents: campaign.budgetCents,
+      budgetType: campaign.budgetType,
+      currency: campaign.currency,
+      startDate,
+      endDate: campaign.endDate,
+      targeting: metaTargeting,
+    })
+
+    // Meta confirmed creation + activation → only now mark DB active.
     await updateAdCampaign(campaign.id, {
       status: 'active',
       campaignId: result.campaignId,
       adSetId: result.adSetId,
       adId: result.adId,
+      creativeId: result.creativeId,
     })
 
-    await sendText(phone, `✅ **Ad Campaign Created!**\n\nCampaign ID: ${result.campaignId}\nAd Set ID: ${result.adSetId}\nAd ID: ${result.adId}\nStatus: ${result.status}\n\nYour ad is created on your Meta Ads account and will start once it passes review. Track it in Meta Ads Manager.`)
+    await sendText(phone, `✅ Your ad is now **ACTIVE** on Meta and will serve immediately (subject to review).\n\nCampaign ID: ${result.campaignId}\nAd Set ID: ${result.adSetId}\nAd ID: ${result.adId}\nStatus: ACTIVE\n\nTrack it in Meta Ads Manager.`)
     await setConversation(phone, { kind: 'idle' })
   } catch (err) {
     logger.error({ phone, error: (err as Error).message }, 'Meta Ads creation failed')
     await updateAdCampaign(campaign.id, { status: 'failed' })
     await sendText(phone, `❌ Failed to create ad campaign: ${(err as Error).message}\n\nYour tokens have been refunded.`)
-    // Refund tokens
     if (user) {
-      const { refundTokens } = await import('../lib/tokens.js')
       const adCost = await getTokenCost('ad_campaign')
-      await refundTokens(userPhone, adCost, campaign.id, 'Ad campaign failed - refund')
+      try {
+        await refundTokens(userPhone, adCost, campaign.id, 'Ad campaign failed - refund', `refund:campaign:${campaign.id}`)
+      } catch (refundErr) {
+        logger.error({ phone, error: (refundErr as Error).message }, 'token refund failed')
+      }
     }
     await setConversation(phone, { kind: 'idle' })
   }
+}
+
+// Apply a real status change (pause/resume/stop) on Meta for a live campaign.
+export async function applyAdCampaignAction(
+  campaignId: string,
+  action: 'pause' | 'resume' | 'stop',
+): Promise<void> {
+  const campaign = await getAdCampaign(campaignId)
+  if (!campaign) throw new Error('Campaign not found')
+  if (!campaign.campaignId || campaign.campaignId.startsWith('DEV_')) return
+  const devMode = config.dev.enabled === true
+  if (devMode) {
+    const next: Record<'pause' | 'resume' | 'stop', 'active' | 'paused' | 'stopped'> = { pause: 'paused', resume: 'active', stop: 'stopped' }
+    await updateAdCampaign(
+      campaign.id,
+      { status: next[action] },
+      { phone: campaign.phone },
+    )
+    return
+  }
+  const userAdAccount = await getAccountByPlatform(campaign.phone, 'meta_ads')
+  const token = userAdAccount?.accessToken
+  if (!token) throw new Error('Meta Ads account not connected')
+  const metaStatus: Record<'pause' | 'resume', 'PAUSED' | 'ACTIVE'> = { pause: 'PAUSED', resume: 'ACTIVE' }
+  const dbStatus: Record<'pause' | 'resume' | 'stop', 'paused' | 'active' | 'stopped'> = { pause: 'paused', resume: 'active', stop: 'stopped' }
+  if (action === 'resume' || action === 'pause') {
+    await setMetaCampaignStatus(token, campaign.campaignId || campaign.adSetId!, metaStatus[action])
+  }
+  // 'stop' is irreversible on Meta (delete); keep DB 'stopped' and leave Meta as-is
+  // (delivery stops when budget is exhausted / campaign paused). We pause Meta so it
+  // stops spending, which is the safe irreversible action.
+  if (action === 'stop') {
+    await setMetaCampaignStatus(token, campaign.campaignId || campaign.adSetId!, 'PAUSED')
+  }
+  await updateAdCampaign(campaign.id, { status: dbStatus[action] }, { phone: campaign.phone })
 }

@@ -18,6 +18,15 @@ const chatJsonMock = vi.mocked(chatJson)
 const brandCheckMock = vi.mocked(brandCheck)
 const planEditMock = vi.mocked(planEdit)
 
+async function waitForText(substr: string, timeoutMs = 3000): Promise<void> {
+  const start = Date.now()
+  while (Date.now() - start < timeoutMs) {
+    if (sendTextMock.mock.calls.some((c) => typeof c[1] === 'string' && (c[1] as string).includes(substr))) return
+    await wait(20)
+  }
+  throw new Error(`Timed out waiting for a text message containing "${substr}"`)
+}
+
 const ORIGINAL: WrittenContent = {
   hook: 'Boost your mornings!',
   caption: '3 simple tips for a better morning routine that will transform your day.',
@@ -79,8 +88,9 @@ describe('Publishing safety & reliability', () => {
 
     expect(sendTextMock).toHaveBeenCalledWith(PHONE, expect.stringContaining('Preparing your'))
     const cancelBtn = sendReplyButtonsMock.mock.calls.find((c) => (c[2] as { id: string }[]).some((b) => b.id === 'cancel'))
-    expect(cancelBtn).toBeDefined()
-    expect(sendTextMock).toHaveBeenCalledWith(PHONE, expect.stringContaining('Published'))
+    expect(cancelBtn).toBeUndefined()
+    // WhatsApp confirmation of the successful publish is delivered to the user.
+    await waitForText('Published')
     expect(publishImageMock).toHaveBeenCalledTimes(1)
   }, 15000)
 

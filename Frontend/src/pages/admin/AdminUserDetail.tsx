@@ -1,10 +1,11 @@
 import React from 'react';
 import { useParams, useNavigate, Link } from 'react-router-dom';
-import { ArrowLeftIcon, CoinsIcon, PackageIcon } from 'lucide-react';
+import { ArrowLeftIcon, CoinsIcon, PackageIcon, PaletteIcon } from 'lucide-react';
 import { AdminLayout } from '../../components/layout/AdminLayout';
 import { AdminHeader } from '../../components/admin/AdminHeader';
 import { Badge } from '../../components/ui/Badge';
 import { Button } from '../../components/ui/Button';
+import { Card } from '../../components/ui/Card';
 import { DataTable, type Column } from '../../components/ui/DataTable';
 import { notify } from '../../components/ui/Toast';
 import { apiRequest, endpoints } from '../../utils/api';
@@ -61,28 +62,38 @@ export function AdminUserDetail() {
   const [payments, setPayments] = React.useState<PaymentRow[]>([]);
   const [audit, setAudit] = React.useState<AuditRow[]>([]);
   const [loading, setLoading] = React.useState(true);
+  const [brandingEnabled, setBrandingEnabled] = React.useState(true);
 
   const load = async () => {
     try {
-      const data = await apiRequest<{ user: any; transactions: any[]; payments: any[]; auditLogs: any[] }>(
+      const userData = await apiRequest<{ user: any; transactions: any[]; payments: any[]; auditLogs: any[] }>(
         endpoints.adminUserDetail(phone)
       );
-      setUser(data.user);
-      setTransactions(data.transactions.map((t) => ({
+      setUser(userData.user);
+      const hasCustomBranding = userData.user?.packageFeatures?.custom_branding === true;
+      if (hasCustomBranding) {
+        try {
+          const brandingData = await apiRequest<{ brandingEnabled: boolean }>(endpoints.adminUserBranding(phone));
+          setBrandingEnabled(brandingData.brandingEnabled ?? true);
+        } catch {
+          setBrandingEnabled(true);
+        }
+      }
+      setTransactions(userData.transactions.map((t) => ({
         id: t.id,
         date: t.createdAt?.split('T')[0] || '',
         description: t.description,
         amount: t.type === 'grant' || t.type === 'refund' || t.type === 'bonus' ? t.amount : -Math.abs(t.amount),
         balance: t.balanceAfter,
       })));
-      setPayments(data.payments.map((p) => ({
+      setPayments(userData.payments.map((p) => ({
         id: p.id,
         date: p.createdAt?.split('T')[0] || '',
         plan: p.packageId || p.type || '—',
         amount: p.amountCents,
         status: p.status,
       })));
-      setAudit(data.auditLogs.map((l) => ({
+      setAudit(userData.auditLogs.map((l) => ({
         id: l.id,
         action: l.action,
         actor: l.actor,
@@ -118,6 +129,23 @@ export function AdminUserDetail() {
     }
   };
 
+  const toggleBranding = async (enabled: boolean) => {
+    setBrandingEnabled(enabled);
+    try {
+      await apiRequest(endpoints.adminUserBranding(user.phone), {
+        method: 'PUT',
+        body: JSON.stringify({ brandingEnabled: enabled }),
+      });
+      notify.success(
+        enabled ? 'Branding enabled' : 'Branding disabled',
+        enabled ? 'User branding will be applied to future posts.' : 'User branding will be skipped for future posts.'
+      );
+    } catch (err) {
+      setBrandingEnabled(!enabled); // Revert on error
+      notify.error('Failed to update', (err as Error).message);
+    }
+  };
+
   if (loading) {
     return (
       <AdminLayout>
@@ -139,6 +167,7 @@ export function AdminUserDetail() {
   const tokensUsed = user.tokensUsed || 0;
   const tokensRemaining = user.tokensRemaining || 0;
   const totalTokens = tokensUsed + tokensRemaining;
+  const hasCustomBranding = user?.packageFeatures?.custom_branding === true;
 
   return (
     <AdminLayout>
@@ -175,6 +204,40 @@ export function AdminUserDetail() {
           <dd className="mt-1">{statusBadge()}</dd>
         </div>
       </dl>
+
+      {/* Branding Settings */}
+      {hasCustomBranding ? (
+        <Card className="mt-6">
+          <div className="flex items-center justify-between">
+            <div>
+              <h3 className="text-lg font-semibold flex items-center gap-2">
+                <PaletteIcon className="h-5 w-5 text-indigo-500" />
+                Branding on Posts
+              </h3>
+              <p className="text-sm text-slate-500 mt-1">When enabled, the user's brand logo, colors, and voice will be applied to generated posts. They can still choose per-post in chat.</p>
+            </div>
+            <label className="relative inline-flex items-center cursor-pointer">
+              <input
+                type="checkbox"
+                checked={brandingEnabled}
+                onChange={(e) => toggleBranding(e.target.checked)}
+                className="sr-only peer"
+              />
+              <div className="w-11 h-6 bg-slate-200 peer-focus:outline-none peer-focus:ring-4 peer-focus:ring-indigo-300 dark:peer-focus:ring-indigo-800 rounded-full peer dark:bg-slate-700 peer-checked:after:translate-x-full rtl:peer-checked:after:-translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:start-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all dark:border-slate-600 peer-checked:bg-indigo-600"></div>
+            </label>
+          </div>
+        </Card>
+      ) : (
+        <Card className="mt-6 border-dashed border-slate-300 bg-slate-50 dark:border-slate-700 dark:bg-slate-800/40">
+          <div className="flex items-center gap-3">
+            <PaletteIcon className="h-5 w-5 text-slate-400" />
+            <div>
+              <h3 className="text-sm font-semibold text-slate-500">Branding on Posts</h3>
+              <p className="text-xs text-slate-400 mt-0.5">Custom branding is not included in this user's package. Assign a plan with "Custom branding" to manage it.</p>
+            </div>
+          </div>
+        </Card>
+      )}
 
       <div className="mt-6 flex flex-wrap gap-3">
         <Button variant="secondary" onClick={() => navigate(`/admin/users?grant=${user.phone}`)}>

@@ -21,6 +21,8 @@ export interface Intent {
   goal: string
   language: string
   emotion: string
+  imageSize?: string
+  platform?: string
 }
 
 export interface PlannedContent {
@@ -70,6 +72,7 @@ export interface Post {
   platformContent?: PlatformContent
   brandCheck?: BrandCheck
   imagePrompt?: string
+  imageSize?: string
   imagePath?: string
   imageUrl?: string
   publishAt?: string
@@ -81,6 +84,9 @@ export interface Post {
   history?: StageEvent[]
   tokensCharged?: number
   tokensChargedAction?: string
+  refundedAt?: string
+  skipBranding?: boolean
+  platforms?: ('instagram' | 'facebook')[]
 }
 
 export type MessageRole = 'user' | 'bot'
@@ -106,6 +112,23 @@ export interface EditRecord {
   createdAt: string
 }
 
+export interface AdConversationData {
+  product?: string
+  productDescription?: string
+  price?: string
+  audience?: string
+  location?: string
+  budget?: number
+  budgetType?: 'daily' | 'total'
+  currency?: string
+  currencySymbol?: string
+  startDate?: string
+  endDate?: string
+  websiteUrl?: string
+  existingPostId?: string
+  platforms?: string[]
+}
+
 export type ConversationState =
   | { kind: 'idle'; postId?: string }
   | { kind: 'gathering'; postId: string; intent: Partial<Intent> }
@@ -115,8 +138,9 @@ export type ConversationState =
   | { kind: 'editing'; postId: string }
   | { kind: 'preparing_publish'; postId: string }
   | { kind: 'publishing'; postId: string }
-  | { kind: 'ad_gathering'; postId: string; step: string; data: Record<string, unknown> }
-  | { kind: 'ad_preview'; postId: string }
+  | { kind: 'ad_gathering'; postId: string; step: string; data: Record<string, unknown>; adData?: AdConversationData }
+  | { kind: 'ad_preview'; postId: string; adData?: AdConversationData }
+  | { kind: 'awaiting_branding'; postId: string }
 
 export type PendingConversation = ConversationState
 
@@ -130,7 +154,19 @@ export type AgentAction =
   | 'cancel_publish'
   | 'new_post'
   | 'create_ad'
+  | 'continue_ad'
+  | 'edit_ad'
+  | 'launch_ad'
+  | 'cancel_ad'
+  | 'pause_ad'
+  | 'resume_ad'
+  | 'stop_ad'
+  | 'use_post_as_ad'
+  | 'add_platform'
+  | 'switch_platform'
   | 'schedule_post'
+  | 'toggle_branding'
+  | 'status_check'
   | 'unclear'
 
 export interface AgentDecision {
@@ -140,6 +176,17 @@ export interface AgentDecision {
   intent?: Partial<Intent>
   editRequest?: string
   scheduleAt?: string
+  brandingOn?: boolean
+  adData?: AdConversationData
+  platform?: 'instagram' | 'facebook' | 'both'
+  /**
+   * Reference resolution: when the user refers to a specific prior entity
+   * ("pehli wali", "doosri wali", "Air Runner wali post", "uski ad") the LLM
+   * resolves it to the id from the recent-entities index in the system prompt.
+   * The backend MUST validate ownership before acting on these ids.
+   */
+  targetPostId?: string
+  targetAdId?: string
 }
 
 export type EditScope = 'caption' | 'image' | 'both' | 'full'
@@ -155,6 +202,7 @@ export interface UserPreferences {
   tone?: string
   audience?: string
   brandVoice?: string
+  brandingEnabled?: boolean
   [key: string]: unknown
 }
 
@@ -296,13 +344,18 @@ export interface AdCampaign {
   postId?: string
   name: string
   objective: string
-  status: 'pending' | 'creating' | 'scheduled' | 'active' | 'paused' | 'cancelled' | 'failed'
+  status: 'pending' | 'creating' | 'scheduled' | 'active' | 'paused' | 'stopped' | 'cancelled' | 'failed'
   adContent: AdContent
   targeting: AdTargeting
   budgetCents: number
+  budgetType: 'daily' | 'total'
+  currency: string
+  startDate?: string
+  endDate?: string
   campaignId?: string
   adSetId?: string
   adId?: string
+  creativeId?: string
   imageUrl?: string
   publishAt?: string
   createdAt: string
@@ -351,6 +404,11 @@ export interface AIUsageLog {
   success: boolean
   error: string
   createdAt: string
+  audioSeconds?: number
+  imageCount?: number
+  pricingVersionId?: string | null
+  unpriced?: boolean
+  cachedInputTokens?: number
 }
 
 export interface AICostConfig {
@@ -361,5 +419,24 @@ export interface AICostConfig {
   costPer1MOutputTokens: number
   costPerImage: number
   costPerAudioMinute: number
+  updatedAt: string
+}
+
+export interface AICostVersion {
+  id: string
+  provider: string
+  category: AIProviderCategory
+  version: number
+  inputRate: number
+  outputRate: number
+  cachedInputRate: number
+  imageRate: number
+  audioRate: number
+  effectiveFrom: string
+  effectiveUntil: string | null
+  source: string
+  lastVerifiedAt: string | null
+  active: boolean
+  createdAt: string
   updatedAt: string
 }

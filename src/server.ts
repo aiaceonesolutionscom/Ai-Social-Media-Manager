@@ -1,12 +1,13 @@
 import { config } from './config.js'
-import { initStore, recoverStuckPosts, listPackages, getAllConfig, getUser, getPackage, createPost, setStage, listScheduledAdCampaigns, cancelScheduledAdCampaign } from './store.js'
-import { providerManager } from './lib/ai/providerManager.js'
+import { initStore, recoverStuckPosts, listPackages, getAllConfig, getUser, getPackage, createPost, setStage, autoResolveErrorLogs } from './store.js'
+import { providerManager, validateProviderRegistry } from './lib/ai/providerManager.js'
 import { metaConfig } from './lib/metaConfig.js'
+import { startTokenRefreshScheduler } from './lib/tokenRefresh.js'
 import { closeDb } from './db.js'
 import { registerMediaRoute } from './routes/media.js'
 import { handleWebhook, handleVerify } from './routes/webhook.js'
 import { handleUserInput, handleVoiceInput } from './pipeline/conversation.js'
-import { startPublishScheduler, schedulePost, getScheduledPosts, cancelScheduledPostById, parseScheduleTime } from './pipeline/publish.js'
+import { startPublishScheduler, schedulePost, getScheduledPosts, cancelScheduledPostById, rescheduleScheduledPost, normalizeScheduleTime } from './pipeline/publish.js'
 import { startAdScheduler } from './pipeline/adScheduler.js'
 import { startPackageExpiryScheduler } from './lib/PackageExpiryScheduler.js'
 import { requireFeature, FeatureNotIncludedError } from './lib/packagePermissions.js'
@@ -28,11 +29,14 @@ import { registerAdminMetaSettingsRoutes } from './routes/admin-api/meta-setting
 import { registerAdminReportRoutes } from './routes/admin-api/reports.js'
 import { registerAdminAdminsRoutes } from './routes/admin-api/admins.js'
 import { registerAdminAuditRoutes } from './routes/admin-api/audit.js'
+import { registerAdminErrorRoutes } from './routes/admin-api/errors.js'
 import { registerAssistantRoutes } from './routes/assistant.js'
 import { registerSupportRoutes } from './routes/support.js'
 import { registerHealthRoutes } from './routes/health.js'
 import { registerBillingRoutes } from './routes/billing.js'
 import { registerStripeRoutes } from './routes/stripe.js'
+import { registerAdSchedulerRoutes } from './routes/adScheduler.js'
+import { registerNotificationRoutes } from './routes/notifications.js'
 import { registerGatewayRoutes } from './routes/gateway.js'
 import { registerAuthRoutes } from './routes/auth.js'
 import { registerSocialRoutes } from './routes/social.js'
@@ -42,16 +46,35 @@ import { registerBrandRoutes } from './routes/brand.js'
 import { registerTopUpRoutes } from './routes/topup.js'
 import { verifySession } from './lib/userAuth.js'
 import { adminAuthMiddleware } from './routes/admin-api/middleware.js'
+import { setLoggerDbReady, logger } from './lib/logger.js'
+
+// Capture any uncaught error from the whole project (A to Z) into the error log.
+function registerGlobalErrorHandlers(): void {
+  process.on('uncaughtException', (err) => {
+    logger.error({ source: 'uncaught', stack: err.stack, error: err.message }, 'uncaught exception')
+  })
+  process.on('unhandledRejection', (reason) => {
+    const err = reason instanceof Error ? reason : new Error(String(reason))
+    logger.error({ source: 'unhandled', stack: err.stack, error: err.message }, 'unhandled promise rejection')
+  })
+}
 
 async function main(): Promise<void> {
+  registerGlobalErrorHandlers()
   await initStore()
+  setLoggerDbReady(true)
   await bootstrapSuperAdmin()
   await providerManager.load()
+  await validateProviderRegistry()
   await metaConfig.load()
   await recoverStuckPosts()
   startPublishScheduler()
   startAdScheduler()
   startPackageExpiryScheduler()
+  startTokenRefreshScheduler()
+  setInterval(() => {
+    autoResolveErrorLogs().catch(() => 0)
+  }, 60 * 60 * 1000)
   // ensureReady() — commented out for dev mode without real API keys
 
   if (config.admin.email === 'admin@example.com' || config.admin.password === 'admin123') {
@@ -62,9 +85,9 @@ async function main(): Promise<void> {
   }
 
   if (config.stripe.secretKey && !config.stripe.webhookSecret) {
-    console.error(
-      'FATAL: STRIPE_WEBHOOK_SECRET is required when STRIPE_SECRET_KEY is set. ' +
-      'Refusing to start — customers would be charged without token credit.',
+    logger.error(
+      { source: 'config' },
+      'FATAL: STRIPE_WEBHOOK_SECRET is required when STRIPE_SECRET_KEY is set. Refusing to start — customers would be charged without token credit.',
     )
     process.exit(1)
   }
@@ -77,6 +100,20 @@ async function main(): Promise<void> {
   }
 
   const server = await import('fastify').then((m) => m.default({ logger: true, bodyLimit: 10 * 1024 * 1024 }))
+
+  server.addHook('onRequest', async (request, reply) => {
+    const origin = request.headers.origin
+    if (origin) {
+      reply.header('Access-Control-Allow-Origin', origin)
+      reply.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS, PATCH')
+      reply.header('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Requested-With')
+      reply.header('Access-Control-Allow-Credentials', 'true')
+      reply.header('Access-Control-Max-Age', '86400')
+    }
+    if (request.method === 'OPTIONS') {
+      reply.code(204).send()
+    }
+  })
 
   // Capture the raw body so we can verify the WhatsApp signature.
   server.addContentTypeParser('application/json', { parseAs: 'string' }, (req: any, body: string, done: any) => {
@@ -153,9 +190,14 @@ async function main(): Promise<void> {
       openai: !!config.image.openaiKey,
       clerk: !!config.clerk.secretKey,
     }
+    const whatsapp = {
+      connected: integrations.whatsapp,
+      number: metaConfig.getWhatsAppDisplayNumber(),
+    }
     return reply.send({
       devMode: config.dev.enabled,
       integrations,
+      whatsapp,
       paymentMethods: {
         stripe: stripeEnabled,
         gateway: gatewayEnabled,
@@ -197,12 +239,13 @@ async function main(): Promise<void> {
   // Public API: token costs (for "How tokens are spent" section)
   server.get('/api/token-costs', async (_req: any, reply: any) => {
     const cfg = await getAllConfig()
+    const { getConfiguredCost } = await import('./lib/TokenEngine.js')
     return reply.send({
       standardPost: Number(cfg.cost_standard_post) || 1,
       crossPlatform: Number(cfg.cost_cross_platform) || 2,
       imageRegenerate: Number(cfg.cost_image_regenerate) || 1,
       adCampaign: Number(cfg.cost_ad_campaign) || 5,
-      voiceTranscription: cfg.cost_voice_transcription || 'Free',
+      voiceTranscription: await getConfiguredCost('voice_transcription'),
       captionEditing: cfg.cost_caption_editing || 'Free',
     })
   })
@@ -245,8 +288,16 @@ async function main(): Promise<void> {
     if (!session) return reply.status(401).send({ error: 'Invalid or expired session' })
 
     const { listPostsForUser } = await import('./store.js')
-    const posts = await listPostsForUser(session.phone)
-    return reply.send({ posts })
+    const [posts, scheduled] = await Promise.all([
+      listPostsForUser(session.phone),
+      getScheduledPosts(session.phone).catch(() => []),
+    ])
+    const scheduledByPost = new Map(scheduled.map((s) => [s.postId, s.publishAt]))
+    const enriched = posts.map((p: any) => ({
+      ...p,
+      scheduledAt: scheduledByPost.get(p.id) || null,
+    }))
+    return reply.send({ posts: enriched })
   })
 
   // User API: get current user's scheduled posts
@@ -292,9 +343,9 @@ async function main(): Promise<void> {
     if (!caption || typeof caption !== 'string' || !caption.trim()) {
       return reply.status(400).send({ error: 'caption is required' })
     }
-    const publishIso = parseScheduleTime(publishAt || '')
+    const publishIso = await normalizeScheduleTime(publishAt || '')
     if (!publishIso) {
-      return reply.status(400).send({ error: 'publishAt must be a valid future time (e.g. ISO date, "in 2 hours", "tomorrow at 5pm")' })
+      return reply.status(400).send({ error: 'publishAt must be a valid future time (e.g. ISO date, "in 2 hours", "tomorrow at 5pm", "15 August at 9am")' })
     }
     const imageBuffer = imageBase64 ? Buffer.from(imageBase64.replace(/^data:image\/\w+;base64,/, ''), 'base64') : undefined
     if (!imageBuffer || imageBuffer.length === 0) {
@@ -341,8 +392,7 @@ async function main(): Promise<void> {
     return reply.send({ success: true })
   })
 
-  // User API: get current user's scheduled ad campaigns
-  server.get('/api/ads/scheduled', async (req: any, reply: any) => {
+  server.post('/api/posts/scheduled/:id/reschedule', async (req: any, reply: any) => {
     const token = req.headers['authorization']?.replace('Bearer ', '') || ''
     if (!token) return reply.status(401).send({ error: 'No token provided' })
 
@@ -351,36 +401,21 @@ async function main(): Promise<void> {
 
     try {
       await requireFeature(session.phone, 'scheduled_publishing')
-      await requireFeature(session.phone, 'ad_campaigns')
-    } catch (err) {
-      if (err instanceof FeatureNotIncludedError) return reply.status(403).send({ error: err.message })
-      throw err
-    }
-
-    const campaigns = await listScheduledAdCampaigns(session.phone)
-    return reply.send({ campaigns })
-  })
-
-  // User API: cancel a scheduled ad campaign
-  server.post('/api/ads/scheduled/:id/cancel', async (req: any, reply: any) => {
-    const token = req.headers['authorization']?.replace('Bearer ', '') || ''
-    if (!token) return reply.status(401).send({ error: 'No token provided' })
-
-    const session = await verifySession(token)
-    if (!session) return reply.status(401).send({ error: 'Invalid or expired session' })
-
-    try {
-      await requireFeature(session.phone, 'scheduled_publishing')
-      await requireFeature(session.phone, 'ad_campaigns')
     } catch (err) {
       if (err instanceof FeatureNotIncludedError) return reply.status(403).send({ error: err.message })
       throw err
     }
 
     const { id } = req.params as { id: string }
-    const cancelled = await cancelScheduledAdCampaign(id, session.phone)
-    if (!cancelled) return reply.status(404).send({ error: 'Scheduled ad not found' })
-    return reply.send({ success: true })
+    const { publishAt } = req.body as { publishAt?: string }
+    const publishIso = await normalizeScheduleTime(publishAt || '')
+    if (!publishIso) {
+      return reply.status(400).send({ error: 'publishAt must be a valid future time' })
+    }
+
+    const rescheduled = await rescheduleScheduledPost(id, session.phone, publishIso)
+    if (!rescheduled) return reply.status(404).send({ error: 'Scheduled post not found' })
+    return reply.send({ success: true, publishAt: publishIso })
   })
 
   server.addHook('preHandler', adminAuthMiddleware)
@@ -397,11 +432,14 @@ async function main(): Promise<void> {
   registerAdminReportRoutes(server)
   registerAdminAdminsRoutes(server)
   registerAdminAuditRoutes(server)
+  registerAdminErrorRoutes(server)
   registerAssistantRoutes(server)
   registerSupportRoutes(server)
   registerHealthRoutes(server)
   registerBillingRoutes(server)
   registerStripeRoutes(server)
+  registerAdSchedulerRoutes(server)
+  registerNotificationRoutes(server)
   registerGatewayRoutes(server)
   registerAuthRoutes(server)
   registerSocialRoutes(server)
@@ -423,7 +461,7 @@ async function main(): Promise<void> {
       await server.close()
       await closeDb()
     } catch (err) {
-      console.error('Error during shutdown:', err)
+      logger.error({ source: 'shutdown', stack: (err as Error).stack, error: (err as Error).message }, 'error during shutdown')
     }
     process.exit(0)
   }
@@ -432,6 +470,6 @@ async function main(): Promise<void> {
 }
 
 main().catch((err) => {
-  console.error('Failed to start server:', err)
+  logger.error({ source: 'startup', stack: (err as Error).stack, error: (err as Error).message }, 'failed to start server')
   process.exit(1)
 })

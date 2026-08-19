@@ -1,25 +1,14 @@
 import { CancelledPublishError, publishImage } from '../lib/instagram.js'
 import { publishToFacebook } from '../lib/facebook.js'
 import { logger } from '../lib/logger.js'
-import { sendReplyButtons, sendText } from '../lib/whatsapp.js'
 import { fullCaption, platformCaption } from '../lib/caption.js'
-import { getPost, getUser, getPackage, resolveUserPhone, setConversation, setStage, getAccountByPlatform, updatePost } from '../store.js'
+import { getPost, getUser, getPackage, resolveUserPhone, setConversation, setStage, getAccountByPlatform } from '../store.js'
 import { getTokenCost, deductTokens } from '../lib/tokens.js'
+import { sendText } from '../lib/whatsapp.js'
 import { auditLogger } from '../lib/AuditLogger.js'
 import { and, eq, sql } from 'drizzle-orm'
 import { getDb } from '../db.js'
 import { scheduledPosts } from '../db/schema.js'
-
-async function getPlatformLabel(phone: string): Promise<string> {
-  const user = await getUser(phone)
-  const pkg = user?.packageId ? await getPackage(user.packageId) : null
-  const features = (pkg?.features || {}) as Record<string, boolean>
-  const hasIG = features.instagram_publishing === true
-  const hasFB = features.facebook_publishing === true
-  if (hasIG && hasFB) return 'social media'
-  if (hasIG) return 'Instagram'
-  return 'Facebook'
-}
 
 // Token action charged for a post publish, based on the platforms the user's
 // package includes. Publishing to both Instagram + Facebook costs more
@@ -61,26 +50,9 @@ export function getPublishJob(postId: string): PublishJob | undefined {
 export async function enqueuePublish(postId: string): Promise<void> {
   const post = await getPost(postId)
   if (!post) throw new Error(`Post ${postId} not found`)
-  if (!post.content || !post.imageUrl) throw new Error('Post has no content or image to publish')
+  if (!post.content || (!post.imageUrl && !post.content.caption)) throw new Error('Post has no content or image to publish')
 
   const userPhone = await resolveUserPhone(post.phone)
-  const user = await getUser(userPhone)
-  let deductedAction: 'standard_post' | 'cross_platform' | null = null
-  if (user) {
-    const { tokenEngine } = await import('../lib/TokenEngine.js')
-    deductedAction = await getPublishTokenAction(userPhone)
-    const estimate = await tokenEngine.estimate(deductedAction, userPhone)
-    if (!estimate.canAfford) {
-      throw new Error('Insufficient tokens. Please upgrade your plan or buy more tokens.')
-    }
-    const deduction = await tokenEngine.deduct(deductedAction, userPhone, `Post publish: ${postId}`)
-    if (!deduction.success) {
-      throw new Error('Failed to reserve tokens. Please try again.')
-    }
-    // Track the charge on the post so recovery (e.g. after a server restart)
-    // can refund it if the post is reset back to awaiting approval.
-    await updatePost(postId, { tokensCharged: estimate.cost, tokensChargedAction: deductedAction })
-  }
 
   const existing = jobs.get(postId)
   if (existing) {
@@ -88,11 +60,6 @@ export async function enqueuePublish(postId: string): Promise<void> {
       throw new Error('This post is already being published and cannot be cancelled.')
     }
     if (!existing.cancelledNotified) {
-      // Same job already queued — token was deducted, refund it so the user is not charged twice.
-      if (deductedAction && user) {
-        const { tokenEngine } = await import('../lib/TokenEngine.js')
-        await tokenEngine.refund(deductedAction, userPhone, `Refund for duplicate publish request: ${postId}`)
-      }
       throw new Error('This post is already preparing to publish. Use cancel to stop it first.')
     }
     jobs.delete(postId)
@@ -115,15 +82,9 @@ export async function enqueuePublish(postId: string): Promise<void> {
 async function runPublish(job: PublishJob): Promise<void> {
   const { postId, phone, userPhone } = job
   try {
-    const platformLabel = await getPlatformLabel(userPhone)
     await setStage(postId, 'PREPARING_TO_PUBLISH')
     await setConversation(phone, { kind: 'preparing_publish', postId })
-
-    await sendText(
-      phone,
-      `✅ Your post has been approved.\n\n⏳ Preparing your ${platformLabel} post...\nPlease wait while I upload and publish it.\n\nIf you changed your mind, you can cancel publishing before the final publish step.`,
-    )
-    await sendReplyButtons(phone, 'Cancel publishing?', [{ id: 'cancel', title: 'Cancel' }])
+    await sendText(phone, `✅ Your post has been approved.\n\n⏳ Preparing your post for publishing...\nPlease wait while I upload and publish it.`)
 
     if (job.cancelRequested) {
       await finalizeCancel(job)
@@ -219,10 +180,7 @@ async function runPublish(job: PublishJob): Promise<void> {
     })
     await setConversation(phone, { kind: 'idle', postId })
     await auditLogger.log({ actor: userPhone, actorType: 'user', action: 'post.publish', target: userPhone, targetType: 'user', details: { postId, permalink: result.permalink } })
-    await sendText(
-      phone,
-      `✅ Published!\n\nPost: ${result.permalink}\n\nDate & Time: ${new Date().toLocaleString()}\n\nSuccess! Your ${platformLabel} post is live.`,
-    )
+    await sendText(phone, `✅ Published!\n\nPost: ${result.permalink}\n\nDate & Time: ${new Date().toLocaleString()}\n\nSuccess! Your post is live.`)
     logger.info({ postId, mediaId: result.mediaId }, 'publish done')
   } catch (err) {
     if (err instanceof CancelledPublishError || job.cancelRequested) {
@@ -232,18 +190,14 @@ async function runPublish(job: PublishJob): Promise<void> {
     logger.error({ postId, error: (err as Error).message }, 'publish failed')
     try {
       const { tokenEngine } = await import('../lib/TokenEngine.js')
-      const action = await getPublishTokenAction(userPhone)
-      await tokenEngine.refund(action, userPhone, `Refund for failed publish: ${postId}`)
+      await tokenEngine.refundPost(postId, userPhone, `Refund for failed publish: ${postId}`)
     } catch (refundErr) {
       logger.error({ postId, error: (refundErr as Error).message }, 'failed to refund tokens after publish failure')
     }
     try {
       await setStage(postId, 'FAILED', { error: (err as Error).message })
       await setConversation(phone, { kind: 'awaiting_approval', postId })
-      await sendText(
-        phone,
-        `❌ Publishing failed: ${(err as Error).message}\n\nYou can try publishing again or keep editing.`,
-      )
+      await sendText(phone, `❌ Publishing failed: ${(err as Error).message}\n\nYou can try publishing again or keep editing.`)
     } catch {
       logger.warn({ postId }, 'could not update post after publish failure — post may have been removed')
     }
@@ -262,15 +216,11 @@ async function finalizeCancel(job: PublishJob): Promise<void> {
   await setConversation(phone, { kind: 'awaiting_approval', postId })
   try {
     const { tokenEngine } = await import('../lib/TokenEngine.js')
-    const action = await getPublishTokenAction(userPhone)
-    await tokenEngine.refund(action, userPhone, `Refund for cancelled publish: ${postId}`)
+    await tokenEngine.refundPost(postId, userPhone, `Refund for cancelled publish: ${postId}`)
   } catch (refundErr) {
     logger.error({ postId, error: (refundErr as Error).message }, 'failed to refund tokens after cancel')
   }
-  await sendText(
-    phone,
-    `✅ Publishing has been cancelled successfully.\n\nYour post was not published.\n\nYou can continue editing the post or publish it later.`,
-  )
+  await sendText(phone, `✅ Publishing has been cancelled successfully.\n\nYour post was not published.\n\nYou can continue editing the post or publish it later.`)
   logger.info({ postId }, 'publish cancelled')
 }
 
@@ -291,15 +241,11 @@ export async function cancelPublish(postId: string): Promise<'cancelled' | 'too_
   job.cancelledNotified = true
   try {
     const { tokenEngine } = await import('../lib/TokenEngine.js')
-    const action = await getPublishTokenAction(job.userPhone)
-    await tokenEngine.refund(action, job.userPhone, `Refund for cancelled publish: ${postId}`)
+    await tokenEngine.refundPost(postId, job.userPhone, `Refund for cancelled publish: ${postId}`)
   } catch (refundErr) {
     logger.error({ postId, error: (refundErr as Error).message }, 'failed to refund tokens after cancel')
   }
-  await sendText(
-    job.phone,
-    `✅ Publishing has been cancelled successfully.\n\nYour post was not published.\n\nYou can continue editing the post or publish it later.`,
-  )
+  await sendText(job.phone, `✅ Publishing has been cancelled successfully.\n\nYour post was not published.\n\nYou can continue editing the post or publish it later.`)
   logger.info({ postId }, 'publish cancelled by user')
   return 'cancelled'
 }
@@ -314,8 +260,20 @@ export function resetPublishJobs(): void {
 
 let schedulerInterval: NodeJS.Timeout | null = null
 
-export async function schedulePost(postId: string, phone: string, publishAt: string): Promise<void> {
+export async function schedulePost(postId: string, phone: string, publishAt: string): Promise<'scheduled' | 'rescheduled'> {
   const now = new Date().toISOString()
+  // Idempotent: if this post already has a pending scheduled row, update its time
+  // instead of inserting a duplicate (the "reschedule" case).
+  const existing = await getDb().select({ id: scheduledPosts.id }).from(scheduledPosts)
+    .where(and(eq(scheduledPosts.postId, postId), sql`${scheduledPosts.status} IN ('pending', 'processing')`))
+    .limit(1)
+  if (existing.length > 0) {
+    await getDb().update(scheduledPosts)
+      .set({ publishAt })
+      .where(eq(scheduledPosts.id, existing[0].id))
+    logger.info({ postId, publishAt }, 'post rescheduled (updated existing scheduled row)')
+    return 'rescheduled'
+  }
   await getDb().insert(scheduledPosts).values({
     id: crypto.randomUUID(),
     postId,
@@ -325,6 +283,7 @@ export async function schedulePost(postId: string, phone: string, publishAt: str
     createdAt: now,
   })
   logger.info({ postId, publishAt }, 'post scheduled for publishing')
+  return 'scheduled'
 }
 
 export async function cancelScheduledPost(postId: string): Promise<boolean> {
@@ -370,60 +329,57 @@ export async function cancelScheduledPostById(id: string, phone: string): Promis
   return rows.length > 0
 }
 
+export async function rescheduleScheduledPost(id: string, phone: string, publishAt: string): Promise<boolean> {
+  const rows = await getDb().update(scheduledPosts)
+    .set({ publishAt })
+    .where(and(eq(scheduledPosts.id, id), eq(scheduledPosts.phone, await resolveUserPhone(phone)), eq(scheduledPosts.status, 'pending')))
+    .returning()
+  return rows.length > 0
+}
+
+// Minimal fallback: only accept already-ISO timestamps or explicit 4-digit-year
+// dates. All natural-language parsing ("kal raat 8", "15 August at 9am", etc.)
+// is delegated to the LLM via normalizeScheduleTime.
 export function parseScheduleTime(value: string): string | null {
   if (!value) return null
   const text = value.trim()
   const now = new Date()
 
   if (!Number.isNaN(Date.parse(text))) {
-    const d = new Date(text)
-    return d > now ? d.toISOString() : null
-  }
-
-  const inMatch = /in\s+(\d+)\s*(minute|min|mins|minutes|hour|hr|hrs|hours|day|days|week|weeks)\b/i.exec(text)
-  if (inMatch) {
-    const n = parseInt(inMatch[1], 10)
-    const unit = inMatch[2].toLowerCase()
-    const d = new Date(now)
-    if (unit.startsWith('min')) d.setMinutes(d.getMinutes() + n)
-    else if (unit.startsWith('h')) d.setHours(d.getHours() + n)
-    else if (unit.startsWith('d')) d.setDate(d.getDate() + n)
-    else if (unit.startsWith('w')) d.setDate(d.getDate() + n * 7)
-    return d > now ? d.toISOString() : null
-  }
-
-  const dayMatch = /\b(today|tonight|tomorrow)\b/i.exec(text)
-  const timeMatch = /(\d{1,2})(?::(\d{2}))?\s*(am|pm|a\.m\.|p\.m\.)?\b/i.exec(text)
-  if (dayMatch) {
-    const d = new Date(now)
-    const dayWord = dayMatch[1].toLowerCase()
-    if (dayWord === 'tomorrow') d.setDate(d.getDate() + 1)
-    if (timeMatch) {
-      let h = parseInt(timeMatch[1], 10)
-      const m = timeMatch[2] ? parseInt(timeMatch[2], 10) : 0
-      const meridiem = (timeMatch[3] || '').toLowerCase()
-      if (meridiem.startsWith('p') && h < 12) h += 12
-      if (meridiem.startsWith('a') && h === 12) h = 0
-      d.setHours(h, m, 0, 0)
-    } else {
-      d.setHours(20, 0, 0, 0)
+    if (/\b\d{4}\b/.test(text) || /^\d{4}-\d{2}-\d{2}/.test(text)) {
+      const d = new Date(text)
+      return d > now ? d.toISOString() : null
     }
-    return d > now ? d.toISOString() : null
-  }
-
-  if (timeMatch) {
-    const d = new Date(now)
-    let h = parseInt(timeMatch[1], 10)
-    const m = timeMatch[2] ? parseInt(timeMatch[2], 10) : 0
-    const meridiem = (timeMatch[3] || '').toLowerCase()
-    if (meridiem.startsWith('p') && h < 12) h += 12
-    if (meridiem.startsWith('a') && h === 12) h = 0
-    d.setHours(h, m, 0, 0)
-    if (d <= now) d.setDate(d.getDate() + 1)
-    return d.toISOString()
   }
 
   return null
+}
+
+// Resolve a natural-language time/date to a future ISO string. Fast-path ISO
+// values; everything else is converted by the LLM (no hardcoded patterns).
+export async function normalizeScheduleTime(value: string): Promise<string | null> {
+  const parsed = parseScheduleTime(value)
+  if (parsed) return parsed
+  try {
+    const now = new Date().toISOString()
+    const { chatJson } = await import('../lib/llm.js')
+    const result = await chatJson<{ iso: string }>(
+      [
+        {
+          role: 'system',
+          content: `You convert natural-language time/date expressions into ISO-8601 timestamps. The current time is ${now} (UTC). The scheduled moment MUST be in the future. Output ONLY a JSON object: {"iso": "..."} — an ISO-8601 timestamp. If you cannot determine a future time, set "iso": "".`,
+        },
+        { role: 'user', content: `When should the post be published? "${value}"` },
+      ],
+      { temperature: 0 },
+    )
+    if (!result?.iso) return null
+    const d = new Date(result.iso)
+    return !Number.isNaN(d.getTime()) && d > new Date() ? d.toISOString() : null
+  } catch (err) {
+    logger.warn({ error: (err as Error).message, value }, 'LLM time normalization failed')
+    return null
+  }
 }
 
 function startScheduler(): void {

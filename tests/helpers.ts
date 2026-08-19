@@ -25,6 +25,7 @@ export async function registerTestUser(opts: { tokens?: number; packageId?: stri
         analytics_dashboard: true,
         priority_support: true,
         ad_campaigns: true,
+        image_generation: true,
       },
     })
   }

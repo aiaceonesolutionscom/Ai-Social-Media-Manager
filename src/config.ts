@@ -38,6 +38,7 @@ export const config = {
     verifyToken: required('WHATSAPP_VERIFY_TOKEN', { soft: true }) || 'change-me-verify-token',
     appSecret: required('WHATSAPP_APP_SECRET', { soft: true }),
     recipientPhone: required('WHATSAPP_RECIPIENT_PHONE', { soft: true }),
+    displayPhoneNumber: required('WHATSAPP_DISPLAY_PHONE_NUMBER', { soft: true }),
   },
 
   instagram: {
@@ -89,17 +90,17 @@ export const config = {
   },
 
   llm: {
-    apiKey: required('LLM_API_KEY', { soft: true }),
-    baseUrl: process.env.LLM_BASE_URL || 'https://api.deepseek.com',
-    model: process.env.LLM_MODEL || 'deepseek-chat',
+    apiKey: process.env.LLM_API_KEY || required('LLM_API_KEY', { soft: true }),
+    baseUrl: process.env.LLM_BASE_URL || 'https://api.mistral.ai/v1',
+    model: process.env.LLM_MODEL || 'mistral-large-latest',
   },
 
   image: {
-    provider: (process.env.IMAGE_PROVIDER || 'openai') as 'openai', // | 'gemini' | 'stability' (uncomment to use)
+    provider: (process.env.IMAGE_PROVIDER || 'openai') as 'openai' | 'gemini' | 'stability',
     model: process.env.IMAGE_MODEL || 'gpt-image-1-mini',
-    // geminiKey: required('GEMINI_API_KEY', { soft: true }),
+    geminiKey: required('GEMINI_API_KEY', { soft: true }),
     openaiKey: required('OPENAI_API_KEY', { soft: true }),
-    // stabilityKey: required('STABILITY_API_KEY', { soft: true }),
+    stabilityKey: required('STABILITY_API_KEY', { soft: true }),
   },
 
   retry: {
@@ -113,6 +114,13 @@ export const config = {
     crossPlatform: 2,
     imageRegenerate: 1,
     adCampaign: 5,
+  },
+
+  // Scheduling token costs
+  scheduling: {
+    schedulePost: 1,
+    scheduleAd: 3,
+    editScheduled: 1,
   },
 }
 
@@ -142,10 +150,10 @@ function ensureSTTReady(): void {
 }
 
 export function ensureImageProviderReady(): void {
+  const provider = config.image.provider
+  if (provider === 'gemini' && !config.image.geminiKey) throw new Error('GEMINI_API_KEY is not set (required when IMAGE_PROVIDER=gemini)')
+  if (provider === 'stability' && !config.image.stabilityKey) throw new Error('STABILITY_API_KEY is not set (required when IMAGE_PROVIDER=stability)')
   if (!config.image.openaiKey) throw new Error('OPENAI_API_KEY is not set (required for image generation)')
-  // Uncomment below to validate other providers:
-  // if (config.image.provider === 'gemini' && !config.image.geminiKey) throw new Error('GEMINI_API_KEY is not set')
-  // if (config.image.provider === 'stability' && !config.image.stabilityKey) throw new Error('STABILITY_API_KEY is not set')
 }
 
 export function ensureLLMReady(): void {

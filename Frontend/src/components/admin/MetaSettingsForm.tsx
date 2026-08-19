@@ -36,6 +36,7 @@ const CATEGORY_LABELS: Record<string, { title: string; description: string; icon
   webhook: { title: 'Webhook', description: 'Webhook verification and security', icon: '🔗' },
   whatsapp: { title: 'WhatsApp Business', description: 'WhatsApp Business Platform credentials', icon: '💬' },
   api_versions: { title: 'API Versions', description: 'Graph API version overrides per platform', icon: '📡' },
+  meta_ads: { title: 'Meta Ads', description: 'Meta Ads (Marketing API) credentials', icon: '📈' },
 };
 
 const KEY_LABELS: Record<string, string> = {
@@ -47,6 +48,7 @@ const KEY_LABELS: Record<string, string> = {
   webhook_secret: 'Webhook Secret',
   access_token: 'WhatsApp Permanent Access Token',
   phone_number_id: 'WhatsApp Phone Number ID',
+  display_phone_number: 'WhatsApp Display Phone Number',
   otp_template: 'OTP Template Name',
   otp_template_language: 'OTP Template Language',
   welcome_template: 'Welcome Template Name',
@@ -54,6 +56,8 @@ const KEY_LABELS: Record<string, string> = {
   facebook: 'Facebook API Version',
   instagram: 'Instagram API Version',
   meta_ads: 'Meta Ads API Version',
+  ad_account_id: 'Meta Ads Account ID',
+  meta_ads_access_token: 'Meta Ads Access Token',
 };
 
 const SENSITIVE_KEYS = new Set([
@@ -95,6 +99,7 @@ const DEFAULT_FIELDS: Record<string, Array<{ key: string; label: string; sensiti
   whatsapp: [
     { key: 'access_token', label: 'WhatsApp Permanent Access Token', sensitive: true, placeholder: 'Enter WhatsApp permanent token' },
     { key: 'phone_number_id', label: 'WhatsApp Phone Number ID', sensitive: false, placeholder: 'Enter phone number ID' },
+    { key: 'display_phone_number', label: 'WhatsApp Display Phone Number', sensitive: false, placeholder: 'e.g. 923001234567' },
     { key: 'otp_template', label: 'OTP Template Name', sensitive: false, placeholder: 'otp_verification' },
     { key: 'otp_template_language', label: 'OTP Template Language', sensitive: false, placeholder: 'en' },
     { key: 'welcome_template', label: 'Welcome Template Name', sensitive: false, placeholder: 'welcome_message' },
@@ -104,6 +109,10 @@ const DEFAULT_FIELDS: Record<string, Array<{ key: string; label: string; sensiti
     { key: 'facebook', label: 'Facebook API Version', sensitive: false, placeholder: 'v21.0' },
     { key: 'instagram', label: 'Instagram API Version', sensitive: false, placeholder: 'v21.0' },
     { key: 'meta_ads', label: 'Meta Ads API Version', sensitive: false, placeholder: 'v21.0' },
+  ],
+  meta_ads: [
+    { key: 'ad_account_id', label: 'Meta Ads Account ID', sensitive: false, placeholder: 'act_123456789' },
+    { key: 'access_token', label: 'Meta Ads Access Token', sensitive: true, placeholder: 'Enter Meta Ads access token' },
   ],
 };
 
@@ -156,11 +165,6 @@ export function MetaSettingsForm({ config, onSave, onTest, testing, testResults 
   const [editing, setEditing] = React.useState<Record<string, string>>({});
   const [saving, setSaving] = React.useState<string | null>(null);
 
-  const getValue = (category: string, key: string) => {
-    const cacheKey = `${category}.${key}`;
-    return editing[cacheKey] ?? config[category]?.[key]?.value ?? '';
-  };
-
   const setValue = (category: string, key: string, value: string) => {
     const cacheKey = `${category}.${key}`;
     setEditing((prev) => ({ ...prev, [cacheKey]: value }));
@@ -195,31 +199,42 @@ export function MetaSettingsForm({ config, onSave, onTest, testing, testResults 
         const existingEntries = Object.fromEntries(
           Object.entries(rawExistingEntries).filter(([key]) => !UNUSED_KEYS.has(key)),
         );
-        const hasExistingData = Object.keys(existingEntries).length > 0;
         const status = getStatus(category);
         const testKey = TESTABLE_CATEGORIES[category];
         const testResult = testKey ? testResults[testKey] : null;
 
         const defaults = DEFAULT_FIELDS[category] || [];
 
-        // Build unified field list: existing data takes priority, fill gaps with defaults
-        const allFields = hasExistingData
-          ? Object.entries(existingEntries).map(([key, entry]) => ({
-              key,
-              label: KEY_LABELS[key] || key,
-              sensitive: SENSITIVE_KEYS.has(key),
-              value: entry.value || '',
-              updatedAt: entry.updatedAt,
-              placeholder: (SENSITIVE_KEYS.has(key) ? '••••••••' : entry.value) || '',
-            }))
-          : defaults.map((f) => ({
-              key: f.key,
-              label: f.label,
-              sensitive: f.sensitive,
-              value: '',
-              updatedAt: undefined,
-              placeholder: f.placeholder,
-            }));
+        // Build unified field list: ALWAYS merge defaults with existing entries so that
+        // saving one field never hides the other (empty) fields of the same category.
+        const merged = new Map<string, { key: string; label: string; sensitive: boolean; value: string; updatedAt?: string; placeholder: string }>();
+
+        for (const f of defaults) {
+          merged.set(f.key, {
+            key: f.key,
+            label: f.label,
+            sensitive: f.sensitive,
+            value: '',
+            updatedAt: undefined,
+            placeholder: f.placeholder,
+          });
+        }
+
+        for (const [key, entry] of Object.entries(existingEntries)) {
+          const existing = merged.get(key);
+          const label = existing?.label || KEY_LABELS[key] || key;
+          const sensitive = existing?.sensitive ?? SENSITIVE_KEYS.has(key);
+          merged.set(key, {
+            key,
+            label,
+            sensitive,
+            value: entry.value || '',
+            updatedAt: entry.updatedAt,
+            placeholder: sensitive ? '••••••••' : entry.value || '',
+          });
+        }
+
+        const allFields = Array.from(merged.values());
 
         return (
           <Card key={category} as="section" hoverable={false}>

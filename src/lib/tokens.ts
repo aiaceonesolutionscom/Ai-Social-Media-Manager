@@ -1,36 +1,17 @@
-import { config } from '../config.js'
 import { logger } from './logger.js'
 import {
   getUser,
-  getConfig,
   createTokenTransaction,
   getTransactions,
 } from '../store.js'
-import { getPool } from '../db.js'
+import { getDb } from '../db.js'
+import { sql, eq } from 'drizzle-orm'
+import { users, tokenTransactions } from '../db/schema.js'
 import type { TokenAction } from '../types.js'
 
-const DB_KEY_MAP: Record<TokenAction, string> = {
-  standard_post: 'cost_standard_post',
-  cross_platform: 'cost_cross_platform',
-  image_regenerate: 'cost_image_regenerate',
-  ad_campaign: 'cost_ad_campaign',
-}
-
 export async function getTokenCost(action: TokenAction): Promise<number> {
-  const dbKey = DB_KEY_MAP[action]
-  const val = await getConfig(dbKey)
-  if (val !== undefined) {
-    if (val.toLowerCase() === 'free' || val === '') return 0
-    const n = Number(val)
-    return isNaN(n) ? 0 : n
-  }
-  const fallback: Record<TokenAction, number> = {
-    standard_post: config.tokenCosts.standardPost,
-    cross_platform: config.tokenCosts.crossPlatform,
-    image_regenerate: config.tokenCosts.imageRegenerate,
-    ad_campaign: config.tokenCosts.adCampaign,
-  }
-  return fallback[action] || 0
+  const { getConfiguredCost } = await import('./TokenEngine.js')
+  return getConfiguredCost(action)
 }
 
 export async function getBalance(phone: string): Promise<number> {
@@ -46,113 +27,128 @@ export async function deductTokens(
   description: string
 ): Promise<boolean> {
   if (amount <= 0) return true
-  const pool = getPool()
+  const db = getDb()
   const now = new Date().toISOString()
 
-  // Atomic read-modify-write: only succeeds if the user has enough tokens
-  const result = await pool.query(
-    `UPDATE users
-     SET tokens_remaining = tokens_remaining - $1,
-         tokens_used = tokens_used + $1,
-         updated_at = $2
-     WHERE phone = $3 AND tokens_remaining >= $1
-     RETURNING tokens_remaining`,
-    [amount, now, phone],
-  )
+  try {
+    return await db.transaction(async (tx) => {
+      const result = await tx
+        .update(users)
+        .set({
+          tokensRemaining: sql`${users.tokensRemaining} - ${amount}`,
+          tokensUsed: sql`${users.tokensUsed} + ${amount}`,
+          updatedAt: now,
+        })
+        .where(sql`${users.phone} = ${phone} AND ${users.tokensRemaining} >= ${amount}`)
+        .returning({ tokensRemaining: users.tokensRemaining })
 
-  if (result.rowCount === 0) {
-    logger.warn({ phone, requested: amount }, 'insufficient tokens')
-    return false
+      if (result.length === 0) {
+        logger.warn({ phone, requested: amount }, 'insufficient tokens')
+        return false
+      }
+
+      const newBalance = result[0].tokensRemaining
+
+      await tx.insert(tokenTransactions).values({
+        id: crypto.randomUUID(),
+        phone,
+        type: 'deduct',
+        amount,
+        balanceAfter: newBalance,
+        description,
+        postId,
+        createdAt: now,
+      })
+
+      logger.info({ phone, amount, balance: newBalance }, 'tokens deducted')
+      return true
+    })
+  } catch (err) {
+    logger.error({ err, phone, amount }, 'token deduction failed')
+    throw err
   }
-
-  const newBalance = result.rows[0].tokens_remaining as number
-  await createTokenTransaction({
-    phone,
-    type: 'deduct',
-    amount,
-    balanceAfter: newBalance,
-    description,
-    postId,
-  })
-
-  logger.info({ phone, amount, balance: newBalance }, 'tokens deducted')
-  return true
 }
 
 export async function grantTokens(
   phone: string,
   amount: number,
   adminId: string,
-  description: string
+  description: string,
+  operationId?: string,
 ): Promise<boolean> {
   if (amount <= 0) return true
-  const pool = getPool()
-  const now = new Date().toISOString()
-
-  const result = await pool.query(
-    `UPDATE users
-     SET tokens_remaining = tokens_remaining + $1,
-         updated_at = $2
-     WHERE phone = $3
-     RETURNING tokens_remaining`,
-    [amount, now, phone],
-  )
-
-  if (result.rowCount === 0) {
-    logger.warn({ phone }, 'cannot grant: user not found')
-    return false
-  }
-
-  const newBalance = result.rows[0].tokens_remaining as number
-  await createTokenTransaction({
-    phone,
-    type: 'grant',
-    amount,
-    balanceAfter: newBalance,
-    description,
-    adminId,
-  })
-
-  logger.info({ phone, amount, balance: newBalance }, 'tokens granted')
-  return true
+  const { tokenEngine } = await import('./TokenEngine.js')
+  const result = await tokenEngine.grant(phone, amount, adminId, description, operationId)
+  return result.success
 }
 
 export async function refundTokens(
   phone: string,
   amount: number,
   postId: string,
-  description: string
+  description: string,
+  operationId?: string,
 ): Promise<boolean> {
   if (amount <= 0) return true
-  const pool = getPool()
+  const db = getDb()
   const now = new Date().toISOString()
 
-  const result = await pool.query(
-    `UPDATE users
-     SET tokens_remaining = tokens_remaining + $1,
-         updated_at = $2
-     WHERE phone = $3
-     RETURNING tokens_remaining`,
-    [amount, now, phone],
-  )
+  try {
+    return await db.transaction(async (tx) => {
+      const { claimed, id: claimId } = await (async () => {
+        const inserted = await tx
+          .insert(tokenTransactions)
+          .values({
+            id: crypto.randomUUID(),
+            phone,
+            type: 'refund',
+            amount,
+            balanceAfter: 0,
+            description,
+            postId,
+            operationId: operationId ?? null,
+            createdAt: now,
+          })
+          .onConflictDoNothing({ target: tokenTransactions.operationId })
+          .returning({ id: tokenTransactions.id })
+        return { claimed: inserted.length > 0, id: inserted[0]?.id ?? null }
+      })()
 
-  if (result.rowCount === 0) {
-    logger.warn({ phone }, 'cannot refund: user not found')
-    return false
+      if (!claimed) {
+        logger.info({ phone, amount, operationId }, 'refund already processed, skipping')
+        return true
+      }
+
+      const result = await tx
+        .update(users)
+        .set({
+          tokensRemaining: sql`${users.tokensRemaining} + ${amount}`,
+          updatedAt: now,
+        })
+        .where(eq(users.phone, phone))
+        .returning({ tokensRemaining: users.tokensRemaining })
+
+      if (result.length === 0) {
+        logger.warn({ phone }, 'cannot refund: user not found')
+        return false
+      }
+
+      const newBalance = result[0].tokensRemaining
+
+      if (claimId) {
+        await tx
+          .update(tokenTransactions)
+          .set({ balanceAfter: newBalance })
+          .where(eq(tokenTransactions.id, claimId))
+      }
+
+      logger.info({ phone, amount, balance: newBalance }, 'tokens refunded')
+      return true
+    })
+  } catch (err) {
+    logger.error({ err, phone, amount }, 'token refund failed')
+    throw err
   }
-
-  const newBalance = result.rows[0].tokens_remaining as number
-  await createTokenTransaction({
-    phone,
-    type: 'refund',
-    amount,
-    balanceAfter: newBalance,
-    description,
-    postId,
-  })
-
-  logger.info({ phone, amount, balance: newBalance }, 'tokens refunded')
-  return true
 }
 
 export async function getTransactionHistory(phone: string, limit = 50) {
