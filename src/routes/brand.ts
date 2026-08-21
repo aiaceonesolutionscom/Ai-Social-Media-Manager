@@ -3,6 +3,7 @@ import { verifySession } from '../lib/userAuth.js'
 import { getBrandProfile, saveBrandProfile, getUserPreferences, saveUserPreferences } from '../store.js'
 import { requireFeature } from '../lib/packagePermissions.js'
 import { saveBrandLogo, brandLogoUrl } from '../lib/branding.js'
+import { isValidTimezone } from '../lib/timezone.js'
 
 async function requireUser(req: any): Promise<string | null> {
   const token = req.headers['authorization']?.replace('Bearer ', '') || ''
@@ -133,5 +134,31 @@ export async function registerBrandRoutes(server: FastifyInstance): Promise<void
     const prefs = await getUserPreferences(phone)
     await saveUserPreferences(phone, { ...(prefs ?? {}), brandingEnabled })
     return reply.send({ success: true, brandingEnabled })
+  })
+
+  // Get user preferences (available to any authenticated user). Currently used
+  // for the per-user timezone used when interpreting schedule times.
+  server.get('/api/preferences', async (req: any, reply: any) => {
+    const phone = await requireUser(req)
+    if (!phone) return reply.status(401).send({ error: 'Unauthorized' })
+
+    const prefs = await getUserPreferences(phone)
+    return reply.send({ timezone: isValidTimezone(prefs?.timezone) ? prefs!.timezone : 'UTC' })
+  })
+
+  // Update user preferences (currently the timezone). The timezone must be a
+  // valid IANA zone name, e.g. "Asia/Karachi" or "America/New_York".
+  server.put('/api/preferences', async (req: any, reply: any) => {
+    const phone = await requireUser(req)
+    if (!phone) return reply.status(401).send({ error: 'Unauthorized' })
+
+    const { timezone } = (req.body ?? {}) as { timezone?: string }
+    if (!isValidTimezone(timezone)) {
+      return reply.status(400).send({ error: 'timezone must be a valid IANA timezone (e.g. "Asia/Karachi")' })
+    }
+
+    const prefs = await getUserPreferences(phone)
+    await saveUserPreferences(phone, { ...(prefs ?? {}), timezone })
+    return reply.send({ success: true, timezone })
   })
 }

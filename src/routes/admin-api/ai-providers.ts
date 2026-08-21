@@ -8,6 +8,7 @@ import {
   validateProviderConnection,
 } from '../../store.js'
 import { providerManager } from '../../lib/ai/providerManager.js'
+import { config } from '../../config.js'
 import { checkProposedMargin } from '../../lib/profitability.js'
 import { guard } from './middleware.js'
 import type { AIProviderCategory } from '../../types.js'
@@ -78,6 +79,9 @@ export async function registerAdminAIProviderRoutes(server: FastifyInstance): Pr
     if (!VALID_CATEGORIES.includes(category)) {
       return reply.status(400).send({ error: `Invalid category. Must be one of: ${VALID_CATEGORIES.join(', ')}` })
     }
+    if (skipValidation === true && !config.dev.enabled) {
+      return reply.status(403).send({ error: 'skipValidation is disabled in production. Provider connections must always be validated.' })
+    }
 
     try {
       const p = await createAIProvider({
@@ -117,6 +121,10 @@ export async function registerAdminAIProviderRoutes(server: FastifyInstance): Pr
       config: Record<string, unknown>
       skipValidation: boolean
     }>
+
+    if (skipValidation === true && !config.dev.enabled) {
+      return reply.status(403).send({ error: 'skipValidation is disabled in production. Provider connections must always be validated.' })
+    }
 
     try {
       const p = await updateAIProvider(id, patch, skipValidation !== true)

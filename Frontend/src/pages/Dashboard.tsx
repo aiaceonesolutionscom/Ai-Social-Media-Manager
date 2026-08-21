@@ -8,7 +8,7 @@ import { StatsCard } from '../components/ui/StatsCard';
 import { Card, CardHeader } from '../components/ui/Card';
 import { Button } from '../components/ui/Button';
 import { DataTable, type Column } from '../components/ui/DataTable';
-import { PostStatusBadge } from '../components/user/PostCard';
+import { PostStatusBadge, PlatformPublishBadges } from '../components/user/PostCard';
 import { PlatformStatusBadge, platformIcons } from '../components/user/PlatformStatus';
 import { UsageChart } from '../components/user/UsageChart';
 import { RequireFeature } from '../components/RequireFeature';
@@ -91,8 +91,9 @@ export function Dashboard() {
             date: p.createdAt?.split('T')[0] || '',
             caption: p.content?.caption || p.transcript || 'Draft post',
             platform: ((p.platforms && p.platforms[0]) || 'instagram') as 'instagram' | 'facebook',
-            status: p.status === 'DONE' ? 'published' : p.status === 'FAILED' ? 'failed' : p.scheduledAt ? 'scheduled' : 'draft',
+            status: p.status === 'DONE' ? 'published' : p.status === 'PARTIAL_SUCCESS' ? 'partial' : p.status === 'FAILED' ? 'failed' : p.scheduledAt ? 'scheduled' : 'draft',
             tokens: 1,
+            platformStatuses: p.platformStatuses || undefined,
           })));
         }
 
@@ -172,6 +173,9 @@ export function Dashboard() {
     return posts.filter((p) => p.platform === platformFilter);
   }, [posts, platformFilter]);
 
+  const onInstagram = (p: Post): boolean => p.platform === 'instagram' || p.platformStatuses?.instagram !== undefined;
+  const onFacebook = (p: Post): boolean => p.platform === 'facebook' || p.platformStatuses?.facebook !== undefined;
+
   const columns: Array<Column<Post>> = [
     { key: 'date', header: 'Date', render: (p) => <span className="whitespace-nowrap">{formatDate(p.date)}</span> },
     {
@@ -181,15 +185,25 @@ export function Dashboard() {
     {
       key: 'platform', header: 'Platform',
       render: (p) => {
-        const Icon = platformIcons[p.platform];
+        const platforms = p.platformStatuses && Object.keys(p.platformStatuses).length > 0
+          ? Object.keys(p.platformStatuses)
+          : [p.platform];
         return (
           <span className="inline-flex items-center gap-2 capitalize">
-            <Icon className="h-4 w-4 text-slate-400" aria-hidden="true" /> {p.platform}
+            {platforms.map((id) => {
+              const Icon = platformIcons[id as keyof typeof platformIcons] ?? platformIcons.instagram;
+              return <span key={id} className="inline-flex items-center gap-1"><Icon className="h-4 w-4 text-slate-400" aria-hidden="true" />{id}</span>;
+            })}
           </span>
         );
       }
     },
-    { key: 'status', header: 'Status', render: (p) => <PostStatusBadge status={p.status} /> },
+    {
+      key: 'status', header: 'Status',
+      render: (p) => p.platformStatuses && Object.keys(p.platformStatuses).length > 1
+        ? <PlatformPublishBadges statuses={p.platformStatuses} />
+        : <PostStatusBadge status={p.status} />
+    },
     {
       key: 'actions', header: 'Actions',
       render: (p) => (
@@ -316,10 +330,10 @@ export function Dashboard() {
         <StatsCard label="Tokens remaining" value={`${tokens} / ${totalTokens}`} icon={CoinsIcon} tone="amber"
           progress={{ value: tokens, max: totalTokens }} index={0} />
         {showInstagram && (
-          <StatsCard label="Instagram posts" value={String(posts.filter(p => p.platform === 'instagram').length)} icon={InstagramIcon} tone="indigo" index={1} />
+          <StatsCard label="Instagram posts" value={String(posts.filter(onInstagram).length)} icon={InstagramIcon} tone="indigo" index={1} />
         )}
         {showFacebook && (
-          <StatsCard label="Facebook posts" value={String(posts.filter(p => p.platform === 'facebook').length)} icon={FacebookIcon} tone="emerald" index={2} />
+          <StatsCard label="Facebook posts" value={String(posts.filter(onFacebook).length)} icon={FacebookIcon} tone="emerald" index={2} />
         )}
         {showMetaAds && (
           <StatsCard label="Meta Ads" value={String(metaAdsCount)} icon={MegaphoneIcon} tone="slate" index={3} />

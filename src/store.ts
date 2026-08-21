@@ -3,7 +3,7 @@ import fs from 'node:fs'
 import { randomUUID } from 'node:crypto'
 import { eq, desc, asc, and, sql, inArray } from 'drizzle-orm'
 import { getDb, getPool } from './db.js'
-import { posts, messages, conversations, postEdits, userPreferences, brandProfile, packages, topupBundles, users, tokenTransactions, socialAccounts, adminConfig, adminUsers, payments, userSessions, adCampaigns, aiProviders, aiUsageLogs, aiProviderCosts, aiProviderCostVersions, metaConfig, supportTickets, supportReplies, auditLogs, webhookEvents, scheduledPosts, notifications, errorLogs } from './db/schema.js'
+import { posts, messages, conversations, chatThreads, postEdits, userPreferences, brandProfile, packages, topupBundles, users, tokenTransactions, socialAccounts, adminConfig, adminUsers, payments, userSessions, adCampaigns, aiProviders, aiUsageLogs, aiProviderCosts, aiProviderCostVersions, metaConfig, supportTickets, supportReplies, auditLogs, webhookEvents, scheduledPosts, notifications, errorLogs } from './db/schema.js'
 import { logger } from './lib/logger.js'
 import { storageDir } from './storage.js'
 import { encryptSecret, decryptSecret } from './lib/crypto.js'
@@ -73,6 +73,15 @@ export async function initStore(): Promise<void> {
       data JSONB NOT NULL,
       updated_at TEXT NOT NULL
     );
+
+    CREATE TABLE IF NOT EXISTS chat_threads (
+      id TEXT PRIMARY KEY,
+      phone TEXT NOT NULL,
+      title TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_chat_threads_phone ON chat_threads(phone, updated_at);
 
     CREATE TABLE IF NOT EXISTS post_edits (
       id TEXT PRIMARY KEY,
@@ -178,12 +187,20 @@ export async function initStore(): Promise<void> {
     CREATE INDEX IF NOT EXISTS idx_social_phone ON social_accounts(phone);
     CREATE INDEX IF NOT EXISTS idx_social_platform ON social_accounts(platform);
     CREATE INDEX IF NOT EXISTS idx_social_status ON social_accounts(status);
+    -- One account per (phone, platform): the OAuth callback may connect multiple pages.
+    -- Deduplicate any legacy duplicates (keep the newest) before adding the unique index.
+    DELETE FROM social_accounts a USING social_accounts b
+      WHERE a.phone = b.phone AND a.platform = b.platform
+        AND (a.connected_at < b.connected_at OR (a.connected_at = b.connected_at AND a.id < b.id));
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_social_phone_platform ON social_accounts(phone, platform);
 
     CREATE TABLE IF NOT EXISTS admin_config (
       key TEXT PRIMARY KEY,
       value TEXT NOT NULL,
+      is_sensitive BOOLEAN NOT NULL DEFAULT false,
       updated_at TEXT NOT NULL
     );
+    ALTER TABLE admin_config ADD COLUMN IF NOT EXISTS is_sensitive BOOLEAN NOT NULL DEFAULT false;
 
     CREATE TABLE IF NOT EXISTS payments (
       id TEXT PRIMARY KEY,
@@ -195,6 +212,7 @@ export async function initStore(): Promise<void> {
       mdr_percent INTEGER,
       tax_amount INTEGER,
       mdr_amount INTEGER,
+      currency TEXT NOT NULL DEFAULT 'USD',
       type TEXT NOT NULL,
       stripe_session_id TEXT,
       status TEXT NOT NULL DEFAULT 'pending',
@@ -207,6 +225,8 @@ export async function initStore(): Promise<void> {
     ALTER TABLE payments ADD COLUMN IF NOT EXISTS mdr_percent INTEGER;
     ALTER TABLE payments ADD COLUMN IF NOT EXISTS tax_amount INTEGER;
     ALTER TABLE payments ADD COLUMN IF NOT EXISTS mdr_amount INTEGER;
+    ALTER TABLE payments ADD COLUMN IF NOT EXISTS currency TEXT NOT NULL DEFAULT 'USD';
+    UPDATE payments SET currency = 'PKR' WHERE stripe_session_id LIKE 'rg_%' AND currency = 'USD';
 
     CREATE TABLE IF NOT EXISTS user_sessions (
       token TEXT PRIMARY KEY,
@@ -398,6 +418,17 @@ export async function initStore(): Promise<void> {
   await pool.query(`ALTER TABLE ad_campaigns ADD COLUMN IF NOT EXISTS ad_id TEXT`)
   await pool.query(`ALTER TABLE ad_campaigns ADD COLUMN IF NOT EXISTS creative_id TEXT`)
   await pool.query(`ALTER TABLE ad_campaigns ADD COLUMN IF NOT EXISTS image_url TEXT`)
+  // Scheduled posts carry a content snapshot so an edit after scheduling never
+  // changes what actually gets published. (P2-8)
+  await pool.query(`ALTER TABLE scheduled_posts ADD COLUMN IF NOT EXISTS content_snapshot JSONB`)
+  // Ad launches are claimed (status 'creating') before touching Meta; record
+  // when the claim happened so a crash mid-launch can be detected and reset.
+  await pool.query(`ALTER TABLE ad_campaigns ADD COLUMN IF NOT EXISTS launch_started_at TEXT`)
+  // Web chat sessions (P1): threads live in chat_threads; their message stream and
+  // conversation state are scoped under the synthetic phone key `thread:<id>` so the
+  // existing phone-keyed state/messaging/ownership code stays intact.
+  await pool.query(`CREATE TABLE IF NOT EXISTS chat_threads (id TEXT PRIMARY KEY, phone TEXT NOT NULL, title TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL)`)
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_chat_threads_phone ON chat_threads(phone, updated_at)`)
   await pool.query(`ALTER TABLE ai_usage_logs ADD COLUMN IF NOT EXISTS audio_seconds INTEGER NOT NULL DEFAULT 0`)
   await pool.query(`ALTER TABLE ai_usage_logs ADD COLUMN IF NOT EXISTS image_count INTEGER NOT NULL DEFAULT 0`)
 
@@ -572,6 +603,7 @@ export async function initStore(): Promise<void> {
   await seedDefaultPackages()
   await seedDefaultTopUpBundles()
   await migratePackageFeatures()
+  await migrateSensitiveAdminConfig()
 
   await seedDefaultAIProviders()
   await seedDefaultAICosts()
@@ -722,6 +754,83 @@ export async function getMessages(phone: string): Promise<MessageRecord[]> {
   }))
 }
 
+// ---- Chat threads (web dashboard sessions) ----
+
+export interface ChatThread {
+  id: string
+  phone: string
+  title?: string
+  createdAt: string
+  updatedAt: string
+}
+
+export async function createChatThread(phone: string, title?: string): Promise<ChatThread> {
+  const now = new Date().toISOString()
+  const thread: ChatThread = {
+    id: randomUUID(),
+    phone,
+    title: title || undefined,
+    createdAt: now,
+    updatedAt: now,
+  }
+  await getDb().insert(chatThreads).values({
+    id: thread.id,
+    phone: thread.phone,
+    title: thread.title ?? null,
+    createdAt: thread.createdAt,
+    updatedAt: thread.updatedAt,
+  })
+  return thread
+}
+
+export async function getChatThread(id: string): Promise<ChatThread | undefined> {
+  const result = await getDb().select().from(chatThreads).where(eq(chatThreads.id, id)).limit(1)
+  if (result.length === 0) return undefined
+  const r = result[0]
+  return { id: r.id, phone: r.phone, title: r.title ?? undefined, createdAt: r.createdAt, updatedAt: r.updatedAt }
+}
+
+export async function listChatThreads(phone: string): Promise<Array<ChatThread & { lastMessage?: { content: string; role: string; createdAt: string } }>> {
+  const rows = await getDb().select().from(chatThreads)
+    .where(eq(chatThreads.phone, phone))
+    .orderBy(desc(chatThreads.updatedAt))
+  const out: Array<ChatThread & { lastMessage?: { content: string; role: string; createdAt: string } }> = []
+  for (const r of rows) {
+    const last = await getDb().select({ content: messages.content, role: messages.role, createdAt: messages.createdAt })
+      .from(messages)
+      .where(eq(messages.phone, threadPhoneKey(r.id)))
+      .orderBy(desc(messages.createdAt))
+      .limit(1)
+    out.push({
+      id: r.id,
+      phone: r.phone,
+      title: r.title ?? undefined,
+      createdAt: r.createdAt,
+      updatedAt: r.updatedAt,
+      lastMessage: last.length > 0
+        ? { content: last[0].content, role: last[0].role, createdAt: last[0].createdAt }
+        : undefined,
+    })
+  }
+  return out
+}
+
+// Thread messages are stored under the synthetic phone key `thread:<id>` so the
+// whole pipeline (state, messages, ownership resolution) works unchanged.
+export function threadPhoneKey(threadId: string): string {
+  return `thread:${threadId}`
+}
+
+export function isThreadPhoneKey(phone: string): boolean {
+  return phone.startsWith('thread:')
+}
+
+export async function touchChatThread(id: string): Promise<void> {
+  await getDb().update(chatThreads)
+    .set({ updatedAt: new Date().toISOString() })
+    .where(eq(chatThreads.id, id))
+}
+
 // ---- Conversations (persisted) ----
 
 export async function getConversation(phone: string): Promise<ConversationState> {
@@ -735,17 +844,55 @@ export async function getConversation(phone: string): Promise<ConversationState>
 }
 
 export async function setConversation(phone: string, conv: ConversationState): Promise<void> {
+  const existing = await getConversation(phone)
+  const data = mergeConversationState(existing, conv)
   await getDb().insert(conversations).values({
     phone,
-    data: conv as Record<string, unknown>,
+    data: data as Record<string, unknown>,
     updatedAt: new Date().toISOString(),
   }).onConflictDoUpdate({
     target: conversations.phone,
     set: {
-      data: conv as Record<string, unknown>,
+      data: data as Record<string, unknown>,
       updatedAt: new Date().toISOString(),
     },
   })
+  if (isThreadPhoneKey(phone)) {
+    await touchChatThread(phone.slice('thread:'.length)).catch(() => { })
+  }
+}
+
+// Same-kind transitions merge structured payloads (intent/adData/step) instead
+// of wiping them; cross-kind transitions replace wholesale (a deliberate state
+// change). This fixes the mid-flow information loss in the audit (#9) where
+// callers set the same state kind without re-passing gathered context.
+function mergeConversationState(existing: ConversationState, next: ConversationState): ConversationState {
+  if (existing.kind === 'idle' || existing.kind !== next.kind) return next
+  if (next.kind === 'gathering') {
+    return {
+      kind: 'gathering',
+      postId: next.postId,
+      intent: { ...(existing as any).intent, ...next.intent },
+    }
+  }
+  if (next.kind === 'ad_gathering') {
+    const hasFreshAdData = !!next.adData && Object.keys(next.adData).length > 0
+    return {
+      kind: 'ad_gathering',
+      postId: next.postId,
+      step: next.step,
+      data: { ...(existing as any).data, ...next.data },
+      adData: hasFreshAdData ? next.adData : { ...(existing as any).adData, ...next.adData },
+    }
+  }
+  if (next.kind === 'ad_preview') {
+    return {
+      kind: 'ad_preview',
+      postId: next.postId,
+      adData: { ...(existing as any).adData, ...next.adData },
+    }
+  }
+  return next
 }
 
 // ---- Edit history ----
@@ -807,6 +954,52 @@ export async function saveUserPreferences(phone: string, prefs: UserPreferences)
       updatedAt: new Date().toISOString(),
     },
   })
+}
+
+// P5-TZ — capture the user's timezone so schedule times are interpreted in THEIR
+// local wall clock, not UTC. Called opportunistically whenever the user mentions
+// a city/country (or explicitly sets it), and once on first scheduling.
+function isValidTimezoneValue(tz: string): boolean {
+  if (!tz || typeof tz !== 'string' || !tz.trim()) return false
+  try {
+    new Intl.DateTimeFormat('en-US', { timeZone: tz })
+    return true
+  } catch {
+    return false
+  }
+}
+
+export async function setUserTimezone(phone: string, timezone: string): Promise<void> {
+  if (!isValidTimezoneValue(timezone)) return
+  const existing = await getUserPreferences(phone)
+  const next: UserPreferences = { ...(existing || { brandingEnabled: true }), timezone }
+  await saveUserPreferences(phone, next)
+}
+
+// Common country/city -> IANA timezone mapping. Used to infer the user's locale
+// from casual chat ("india", "karachi", "pakistan time") without a separate prompt.
+const CITY_TZ_MAP: Record<string, string> = {
+  pakistan: 'Asia/Karachi', karachi: 'Asia/Karachi', lahore: 'Asia/Karachi', islamabad: 'Asia/Karachi',
+  india: 'Asia/Kolkata', delhi: 'Asia/Kolkata', mumbai: 'Asia/Kolkata', bangalore: 'Asia/Kolkata',
+  'new york': 'America/New_York', 'new york city': 'America/New_York', usa: 'America/New_York', us: 'America/New_York', america: 'America/New_York',
+  uk: 'Europe/London', london: 'Europe/London', england: 'Europe/London',
+  uae: 'Asia/Dubai', dubai: 'Asia/Dubai', 'saudi': 'Asia/Riyadh', 'riyadh': 'Asia/Riyadh',
+  canada: 'America/Toronto', toronto: 'America/Toronto',
+  australia: 'Australia/Sydney', sydney: 'Australia/Sydney',
+  bangladesh: 'Asia/Dhaka', dhaka: 'Asia/Dhaka',
+  'south africa': 'Africa/Johannesburg', nigeria: 'Africa/Lagos', lagos: 'Africa/Lagos',
+  singapore: 'Asia/Singapore', indonesia: 'Asia/Jakarta', jakarta: 'Asia/Jakarta',
+  philippines: 'Asia/Manila', germany: 'Europe/Berlin', berlin: 'Europe/Berlin',
+  france: 'Europe/Paris', paris: 'Europe/Paris',
+}
+
+export function detectCityTimezone(text: string): string | undefined {
+  if (!text) return undefined
+  const lower = text.toLowerCase()
+  for (const [key, tz] of Object.entries(CITY_TZ_MAP)) {
+    if (lower.includes(key)) return tz
+  }
+  return undefined
 }
 
 export async function getBrandProfile(phone: string): Promise<BrandProfile | undefined> {
@@ -1069,6 +1262,19 @@ function userFromRow(row: typeof users.$inferSelect): User {
   }
 }
 
+/**
+ * Strips the bcrypt passwordHash from a User object before it is returned to any
+ * client. Admin APIs must never expose password hashes for offline cracking.
+ */
+export function sanitizeUser(user: User): User {
+  const { passwordHash, ...safe } = user
+  return safe as User
+}
+
+export function sanitizeUsers(usersList: User[]): User[] {
+  return usersList.map(sanitizeUser)
+}
+
 export async function createUser(data: { phone: string; name?: string; email?: string; packageId?: string; packageStatus?: User['packageStatus']; packageStartedAt?: string; packageExpiresAt?: string; tokensRemaining?: number; stripeCustomerId?: string; passwordHash?: string; oauthProvider?: string; oauthId?: string; avatarUrl?: string }): Promise<User> {
   const now = new Date().toISOString()
   const user: User = {
@@ -1255,18 +1461,37 @@ export async function connectAccount(data: { phone: string; platform: 'instagram
     status: 'active',
     connectedAt: new Date().toISOString(),
   }
-  await getDb().insert(socialAccounts).values({
-    id: account.id,
-    phone: account.phone,
-    platform: account.platform,
-    accountId: account.accountId,
-    accountName: account.accountName,
-    accessToken: await encryptSecret(account.accessToken),
-    refreshToken: account.refreshToken ? await encryptSecret(account.refreshToken) : '',
-    tokenExpiresAt: account.tokenExpiresAt,
-    status: account.status,
-    connectedAt: account.connectedAt,
-  })
+  const encToken = await encryptSecret(account.accessToken)
+  const encRefresh = account.refreshToken ? await encryptSecret(account.refreshToken) : ''
+  // Upsert on (phone, platform): the OAuth callback loops over every Facebook page / ad
+  // account for a user, so a second page must update the existing row instead of
+  // aborting the whole connect on a unique-index violation.
+  await getDb()
+    .insert(socialAccounts)
+    .values({
+      id: account.id,
+      phone: account.phone,
+      platform: account.platform,
+      accountId: account.accountId,
+      accountName: account.accountName,
+      accessToken: encToken,
+      refreshToken: encRefresh,
+      tokenExpiresAt: account.tokenExpiresAt,
+      status: account.status,
+      connectedAt: account.connectedAt,
+    })
+    .onConflictDoUpdate({
+      target: [socialAccounts.phone, socialAccounts.platform],
+      set: {
+        accountId: account.accountId,
+        accountName: account.accountName,
+        accessToken: encToken,
+        refreshToken: encRefresh,
+        tokenExpiresAt: account.tokenExpiresAt,
+        status: account.status,
+        connectedAt: account.connectedAt,
+      },
+    })
   return account
 }
 
@@ -1305,9 +1530,13 @@ export async function updateSocialAccount(id: string, patch: Partial<{ accessTok
 // user whose canonical phone is `social_accounts.phone`. Users whose canonical phone IS
 // the real number (e.g. admin-created or tests) resolve to themselves directly.
 export async function resolveUserPhone(phone: string): Promise<string> {
+  // Web chat sessions use the synthetic key `thread:<id>`; resolve to the owner.
+  if (isThreadPhoneKey(phone)) {
+    const thread = await getChatThread(phone.slice('thread:'.length))
+    return thread?.phone || phone
+  }
   const direct = await getUser(phone)
   if (direct) return phone
-
   const result = await getDb().select({ userPhone: socialAccounts.phone }).from(socialAccounts)
     .where(and(eq(socialAccounts.platform, 'whatsapp'), eq(socialAccounts.accountId, phone)))
     .limit(1)
@@ -1325,10 +1554,21 @@ export async function getUserByWhatsAppNumber(waNumber: string): Promise<User | 
 
 // ---- Admin Config ----
 
+// P5-3 — admin_config values holding secrets are encrypted at rest. Keys are
+// matched exactly or by prefix so legacy/new callers never see plaintext on disk.
+const ADMIN_SENSITIVE_EXACT = new Set(['admin_jwt_secret', 'admin_sessions', 'gateway_api_key', 'gateway_webhook_secret'])
+const ADMIN_SENSITIVE_PREFIXES = ['otp:']
+
+export function isAdminConfigSensitiveKey(key: string): boolean {
+  if (ADMIN_SENSITIVE_EXACT.has(key)) return true
+  return ADMIN_SENSITIVE_PREFIXES.some((p) => key.startsWith(p))
+}
+
 function adminConfigFromRow(row: typeof adminConfig.$inferSelect): AdminConfig {
   return {
     key: row.key,
     value: row.value,
+    isSensitive: row.isSensitive,
     updatedAt: row.updatedAt,
   }
 }
@@ -1336,18 +1576,22 @@ function adminConfigFromRow(row: typeof adminConfig.$inferSelect): AdminConfig {
 export async function getConfig(key: string): Promise<string | undefined> {
   const result = await getDb().select().from(adminConfig).where(eq(adminConfig.key, key)).limit(1)
   if (result.length === 0) return undefined
-  return result[0].value
+  return result[0].isSensitive ? decryptSecret(result[0].value) : result[0].value
 }
 
 export async function setConfig(key: string, value: string): Promise<void> {
+  const sensitive = isAdminConfigSensitiveKey(key)
+  const stored = sensitive && value ? await encryptSecret(value) : value
   await getDb().insert(adminConfig).values({
     key,
-    value,
+    value: stored,
+    isSensitive: sensitive,
     updatedAt: new Date().toISOString(),
   }).onConflictDoUpdate({
     target: adminConfig.key,
     set: {
-      value,
+      value: stored,
+      isSensitive: sensitive,
       updatedAt: new Date().toISOString(),
     },
   })
@@ -1357,7 +1601,7 @@ export async function getAllConfig(): Promise<Record<string, string>> {
   const result = await getDb().select().from(adminConfig)
   const config: Record<string, string> = {}
   for (const row of result) {
-    config[row.key] = row.value
+    config[row.key] = row.isSensitive ? await decryptSecret(row.value) : row.value
   }
   return config
 }
@@ -1375,14 +1619,15 @@ function paymentFromRow(row: typeof payments.$inferSelect): Payment {
     mdrPercent: row.mdrPercent ?? 0,
     taxAmount: row.taxAmount ?? 0,
     mdrAmount: row.mdrAmount ?? 0,
+    currency: row.currency || 'USD',
     type: row.type as 'subscription' | 'one_time' | 'token_purchase' | 'topup',
     stripeSessionId: row.stripeSessionId || '',
-    status: row.status as 'pending' | 'completed' | 'failed' | 'refunded',
+    status: row.status as 'pending' | 'processing' | 'completed' | 'failed' | 'refunded',
     createdAt: row.createdAt,
   }
 }
 
-export async function createPayment(data: { phone: string; packageId?: string | null; tokenCount: number; amountCents: number; type: 'subscription' | 'one_time' | 'token_purchase' | 'topup'; stripeSessionId?: string; taxPercent?: number; mdrPercent?: number; taxAmount?: number; mdrAmount?: number }): Promise<Payment> {
+export async function createPayment(data: { phone: string; packageId?: string | null; tokenCount: number; amountCents: number; type: 'subscription' | 'one_time' | 'token_purchase' | 'topup'; stripeSessionId?: string; taxPercent?: number; mdrPercent?: number; taxAmount?: number; mdrAmount?: number; currency?: string }): Promise<Payment> {
   const payment: Payment = {
     id: randomUUID(),
     phone: data.phone,
@@ -1393,6 +1638,7 @@ export async function createPayment(data: { phone: string; packageId?: string | 
     mdrPercent: data.mdrPercent ?? 0,
     taxAmount: data.taxAmount ?? 0,
     mdrAmount: data.mdrAmount ?? 0,
+    currency: data.currency || 'USD',
     type: data.type,
     stripeSessionId: data.stripeSessionId || '',
     status: 'pending',
@@ -1408,6 +1654,7 @@ export async function createPayment(data: { phone: string; packageId?: string | 
     mdrPercent: payment.mdrPercent,
     taxAmount: payment.taxAmount,
     mdrAmount: payment.mdrAmount,
+    currency: payment.currency,
     type: payment.type,
     stripeSessionId: payment.stripeSessionId,
     status: payment.status,
@@ -1480,6 +1727,17 @@ export async function failPayment(id: string): Promise<Payment> {
   return paymentFromRow(result[0])
 }
 
+/** Marks a completed payment as refunded. */
+export async function refundPayment(id: string): Promise<Payment> {
+  const result = await getDb()
+    .update(payments)
+    .set({ status: 'refunded' })
+    .where(sql`${payments.id} = ${id} AND ${payments.status} = 'completed'`)
+    .returning()
+  if (result.length === 0) throw new Error(`Payment ${id} not found or not completed`)
+  return paymentFromRow(result[0])
+}
+
 export async function listPayments(phone?: string): Promise<Payment[]> {
   let query
   if (phone) {
@@ -1503,11 +1761,31 @@ export async function updatePayment(id: string, patch: Partial<Payment>): Promis
     mdrPercent: updated.mdrPercent,
     taxAmount: updated.taxAmount,
     mdrAmount: updated.mdrAmount,
+    currency: updated.currency,
     type: updated.type,
     stripeSessionId: updated.stripeSessionId,
     status: updated.status,
   }).where(eq(payments.id, id))
   return updated
+}
+
+// H14 — recovery job for payments stuck mid-flight. A payment left in
+// 'processing' (webhook claimed it but crashed before completion) is reset to
+// 'pending' so the next delivery can claim it again. Abandoned 'pending'
+// checkouts older than 48h are failed so they stop blocking the user.
+export async function recoverStuckPayments(processingStaleMs = 15 * 60 * 1000, pendingStaleMs = 48 * 60 * 60 * 1000): Promise<{ reset: number; failed: number }> {
+  const now = Date.now()
+  const reset = await getDb()
+    .update(payments)
+    .set({ status: 'pending' })
+    .where(sql`${payments.status} = 'processing' AND ${payments.createdAt}::timestamptz < ${new Date(now - processingStaleMs).toISOString()}`)
+    .returning({ id: payments.id })
+  const failed = await getDb()
+    .update(payments)
+    .set({ status: 'failed' })
+    .where(sql`${payments.status} = 'pending' AND ${payments.createdAt}::timestamptz < ${new Date(now - pendingStaleMs).toISOString()}`)
+    .returning({ id: payments.id })
+  return { reset: reset.length, failed: failed.length }
 }
 
 // ---- User Auth (email/password + OAuth) ----
@@ -1725,6 +2003,36 @@ export async function createNotification(input: {
   }
   await getDb().insert(notifications).values(row)
   return notificationFromRow(row as typeof notifications.$inferSelect)
+}
+
+export async function logWebhookEvent(input: {
+  source: string
+  eventType: string
+  payload?: Record<string, unknown>
+  headers?: Record<string, unknown>
+  status?: string
+  responseCode?: number
+  error?: string
+  retryCount?: number
+}): Promise<void> {
+  const now = new Date().toISOString()
+  await getDb().insert(webhookEvents).values({
+    id: randomUUID(),
+    source: input.source,
+    eventType: input.eventType,
+    payload: (input.payload ?? {}) as Record<string, unknown>,
+    headers: (input.headers ?? {}) as Record<string, unknown>,
+    status: input.status ?? 'received',
+    responseCode: input.responseCode ?? null,
+    error: input.error ?? null,
+    retryCount: input.retryCount ?? 0,
+    createdAt: now,
+  })
+}
+
+export async function countWebhookEvents(): Promise<number> {
+  const result = await getDb().select({ count: sql`count(*)` }).from(webhookEvents)
+  return Number(result[0]?.count ?? 0)
 }
 
 export async function listNotifications(opts: {
@@ -2011,6 +2319,29 @@ async function migratePackageFeatures(): Promise<void> {
   await setConfig('package_features_migration', 'v3')
 }
 
+// P5-3 — one-time re-encryption of legacy admin_config values that were stored
+// in plaintext before the is_sensitive flag existed. Only rows that hold secrets
+// and are not yet marked sensitive are touched, so this is idempotent.
+async function migrateSensitiveAdminConfig(): Promise<void> {
+  const rows = await getDb().select().from(adminConfig)
+  let updated = 0
+  for (const row of rows) {
+    if (row.isSensitive) continue
+    if (!isAdminConfigSensitiveKey(row.key)) continue
+    if (!row.value || row.value.startsWith('enc:v1:')) continue
+    const stored = await encryptSecret(row.value)
+    await getDb().update(adminConfig).set({
+      value: stored,
+      isSensitive: true,
+      updatedAt: new Date().toISOString(),
+    }).where(eq(adminConfig.key, row.key))
+    updated++
+  }
+  if (updated > 0) {
+    logger.info({ updated }, 'migrated sensitive admin_config values to encrypted at rest')
+  }
+}
+
 // ---- AI Provider Seeding (from env vars) ----
 
 async function seedDefaultAIProviders(): Promise<void> {
@@ -2043,9 +2374,9 @@ async function seedDefaultAIProviders(): Promise<void> {
   if (llmKey) {
     const providerName = llmBase.includes('deepseek') ? 'deepseek'
       : llmBase.includes('mistral') ? 'mistral'
-      : llmBase.includes('openai') ? 'openai'
-      : llmBase.includes('anthropic') ? 'anthropic'
-      : 'custom'
+        : llmBase.includes('openai') ? 'openai'
+          : llmBase.includes('anthropic') ? 'anthropic'
+            : 'custom'
     defaults.push({
       category: 'llm',
       provider: providerName,
@@ -2140,17 +2471,17 @@ async function seedDefaultAICosts(): Promise<void> {
   const now = new Date().toISOString()
   const defaults: { provider: string; category: AIProviderCategory; costPer1MInputTokens: number; costPer1MOutputTokens: number; costPerImage: number; costPerAudioMinute: number }[] = [
     // LLM (cents per 1M tokens)
-    { provider: 'deepseek',   category: 'llm', costPer1MInputTokens: 27,  costPer1MOutputTokens: 110,  costPerImage: 0, costPerAudioMinute: 0 },
-    { provider: 'mistral',    category: 'llm', costPer1MInputTokens: 200, costPer1MOutputTokens: 600,  costPerImage: 0, costPerAudioMinute: 0 },
-    { provider: 'openai',     category: 'llm', costPer1MInputTokens: 250, costPer1MOutputTokens: 1000, costPerImage: 0, costPerAudioMinute: 0 },
-    { provider: 'anthropic',  category: 'llm', costPer1MInputTokens: 300, costPer1MOutputTokens: 1500, costPerImage: 0, costPerAudioMinute: 0 },
+    { provider: 'deepseek', category: 'llm', costPer1MInputTokens: 27, costPer1MOutputTokens: 110, costPerImage: 0, costPerAudioMinute: 0 },
+    { provider: 'mistral', category: 'llm', costPer1MInputTokens: 200, costPer1MOutputTokens: 600, costPerImage: 0, costPerAudioMinute: 0 },
+    { provider: 'openai', category: 'llm', costPer1MInputTokens: 250, costPer1MOutputTokens: 1000, costPerImage: 0, costPerAudioMinute: 0 },
+    { provider: 'anthropic', category: 'llm', costPer1MInputTokens: 300, costPer1MOutputTokens: 1500, costPerImage: 0, costPerAudioMinute: 0 },
     // STT (cents per minute of audio)
-    { provider: 'groq',       category: 'stt', costPer1MInputTokens: 0,   costPer1MOutputTokens: 0,    costPerImage: 0, costPerAudioMinute: 0 },
-    { provider: 'openai-stt', category: 'stt', costPer1MInputTokens: 0,   costPer1MOutputTokens: 0,    costPerImage: 0, costPerAudioMinute: 1 },
+    { provider: 'groq', category: 'stt', costPer1MInputTokens: 0, costPer1MOutputTokens: 0, costPerImage: 0, costPerAudioMinute: 0 },
+    { provider: 'openai-stt', category: 'stt', costPer1MInputTokens: 0, costPer1MOutputTokens: 0, costPerImage: 0, costPerAudioMinute: 1 },
     // Image (cents per image)
-    { provider: 'openai',     category: 'image', costPer1MInputTokens: 0,  costPer1MOutputTokens: 0,   costPerImage: 1, costPerAudioMinute: 0 },
-    { provider: 'gemini',     category: 'image', costPer1MInputTokens: 0,  costPer1MOutputTokens: 0,   costPerImage: 4,   costPerAudioMinute: 0 },
-    { provider: 'stability',  category: 'image', costPer1MInputTokens: 0,  costPer1MOutputTokens: 0,   costPerImage: 4,   costPerAudioMinute: 0 },
+    { provider: 'openai', category: 'image', costPer1MInputTokens: 0, costPer1MOutputTokens: 0, costPerImage: 1, costPerAudioMinute: 0 },
+    { provider: 'gemini', category: 'image', costPer1MInputTokens: 0, costPer1MOutputTokens: 0, costPerImage: 4, costPerAudioMinute: 0 },
+    { provider: 'stability', category: 'image', costPer1MInputTokens: 0, costPer1MOutputTokens: 0, costPerImage: 4, costPerAudioMinute: 0 },
   ]
 
   for (const d of defaults) {
@@ -2206,6 +2537,13 @@ async function syncAICostVersionsFromCosts(): Promise<void> {
 
 export async function resetStore(): Promise<void> {
   const pool = getPool()
+  // Safety guard: resetStore wipes every table. Only ever allow it against a test
+  // database so a misconfigured DATABASE_URL can never destroy production data.
+  const { rows } = await pool.query<{ db: string }>('SELECT current_database() AS db')
+  const currentDb = rows[0]?.db || ''
+  if (!currentDb.endsWith('_test')) {
+    throw new Error(`resetStore refused: current database "${currentDb}" does not end with "_test". Refusing to wipe non-test data.`)
+  }
   await pool.query('DELETE FROM posts')
   await pool.query('DELETE FROM messages')
   await pool.query('DELETE FROM post_edits')
@@ -2227,6 +2565,35 @@ export async function resetStore(): Promise<void> {
   await pool.query('DELETE FROM support_tickets')
   await pool.query('DELETE FROM webhook_events')
   await pool.query('DELETE FROM scheduled_posts')
+  await pool.query('DELETE FROM chat_threads')
+  await pool.query('DELETE FROM ad_campaigns')
+  // H8 — forget the webhook dedup window so a fresh conversation never reuses
+  // stale message ids (also keeps the in-memory map from growing unbounded).
+  processedWebhookMessages.clear()
+}
+
+// ---- Webhook message dedup (H8) ----
+// WhatsApp redelivers the SAME message id after transient failures. A duplicate
+// delivery must never trigger the action twice (double post, double publish,
+// double ad launch). Keyed per phone so unrelated conversations never collide.
+const processedWebhookMessages = new Map<string, { msgId: string; at: number }>()
+const MSG_DEDUP_TTL_MS = 10 * 60 * 1000
+
+export function isDuplicateDelivery(phone: string, msgId: string): boolean {
+  if (!phone || !msgId) return false
+  const now = Date.now()
+  if (processedWebhookMessages.size > 5000) {
+    for (const [key, entry] of processedWebhookMessages) {
+      if (now - entry.at > MSG_DEDUP_TTL_MS) processedWebhookMessages.delete(key)
+    }
+  }
+  const key = `${phone}:${msgId}`
+  const seen = processedWebhookMessages.get(key)
+  if (seen && now - seen.at < MSG_DEDUP_TTL_MS) {
+    return true
+  }
+  processedWebhookMessages.set(key, { msgId, at: now })
+  return false
 }
 
 const STUCK_STATUSES = ['PREPARING_TO_PUBLISH', 'PUBLISHING'] as PostStage[]
@@ -2275,6 +2642,36 @@ export async function recoverStuckPosts(): Promise<number> {
   }
   if (recovered > 0) {
     logger.info({ recovered }, 'recovered stuck posts after restart')
+  }
+  return recovered
+}
+
+/**
+ * Recovers scheduled_posts rows stuck in 'processing' after a server restart or
+ * a crash mid-enqueue. 'processing' rows mean the scheduler claimed the job but
+ * never finished marking it 'completed'/'failed'. If the associated post has
+ * already reached a terminal published state (a crash after publish but before
+ * the row was marked), the row is marked 'completed'/'cancelled' instead of
+ * being reset — that prevents a duplicate publish on the next tick. Rows whose
+ * post is still not published are reset to 'pending' so the next tick re-tries.
+ */
+export async function recoverStuckScheduledPosts(): Promise<number> {
+  const db = getDb()
+  const stuck = await db.select().from(scheduledPosts).where(eq(scheduledPosts.status, 'processing'))
+  let recovered = 0
+  for (const item of stuck) {
+    const post = await getPost(item.postId)
+    if (post && (post.status === 'DONE' || post.status === 'PARTIAL_SUCCESS')) {
+      await db.update(scheduledPosts).set({ status: 'completed', processedAt: new Date().toISOString() }).where(eq(scheduledPosts.id, item.id))
+    } else if (post && post.status === 'CANCELLED') {
+      await db.update(scheduledPosts).set({ status: 'cancelled', processedAt: new Date().toISOString() }).where(eq(scheduledPosts.id, item.id))
+    } else {
+      await db.update(scheduledPosts).set({ status: 'pending' }).where(eq(scheduledPosts.id, item.id))
+    }
+    recovered++
+  }
+  if (recovered > 0) {
+    logger.info({ recovered }, 'recovered stuck scheduled posts after restart')
   }
   return recovered
 }
@@ -2368,6 +2765,50 @@ export async function getAdCampaign(id: string): Promise<AdCampaign | undefined>
   const result = await getDb().select().from(adCampaigns).where(eq(adCampaigns.id, id)).limit(1)
   if (result.length === 0) return undefined
   return adCampaignFromRow(result[0])
+}
+
+/**
+ * Atomically claims a campaign for launch by transitioning it to 'creating'.
+ * The WHERE clause makes this race-safe: two concurrent launch attempts can
+ * only ever succeed for one of them. Returns false when the campaign is already
+ * 'creating' (a launch is in flight) or in a terminal state — callers must not
+ * launch again in that case. P1-20 — the old code only set 'creating' late in
+ * the flow, so two quick approvals could both reach Meta and create duplicates.
+ */
+export async function claimAdCampaignForLaunch(id: string): Promise<boolean> {
+  const rows = await getDb().update(adCampaigns)
+    .set({ status: 'creating', launchStartedAt: new Date().toISOString(), updatedAt: new Date().toISOString() })
+    .where(and(
+      eq(adCampaigns.id, id),
+      sql`${adCampaigns.status} NOT IN ('active', 'paused', 'stopped', 'cancelled', 'failed', 'creating')`,
+    ))
+    .returning({ id: adCampaigns.id })
+  return rows.length > 0
+}
+
+/**
+ * P2-21 — resets ad campaigns that were claimed ('creating') but never finished
+ * launching because the process crashed mid-launch (network drop, restart,
+ * deploy). A campaign stuck 'creating' can never be launched again: the claim
+ * guard refuses to touch it and nothing else marks it failed.
+ *
+ * A live claim always sets launch_started_at, so only two shapes are reset:
+ *   1. rows whose claim started longer than `staleMs` ago, or
+ *   2. rows with NO claim timestamp whose updated_at is equally old — these are
+ *      legacy claims made before launch_started_at existed and are stuck by
+ *      definition. Fresh 'creating' rows (recently claimed, or set directly
+ *      mid-launch) are left untouched so an in-flight launch is never retried.
+ */
+export async function recoverStuckAdCampaigns(staleMs = 10 * 60 * 1000): Promise<number> {
+  const cutoff = new Date(Date.now() - staleMs).toISOString()
+  const rows = await getDb().update(adCampaigns)
+    .set({ status: 'pending', launchStartedAt: null, updatedAt: new Date().toISOString() })
+    .where(sql`${adCampaigns.status} = 'creating' AND (${adCampaigns.launchStartedAt} < ${cutoff} OR (${adCampaigns.launchStartedAt} IS NULL AND ${adCampaigns.updatedAt} < ${cutoff}))`)
+    .returning({ id: adCampaigns.id })
+  if (rows.length > 0) {
+    logger.info({ recovered: rows.length }, 'recovered stuck ad campaigns after crash')
+  }
+  return rows.length
 }
 
 export async function getAdCampaignByPhone(id: string, phone: string): Promise<AdCampaign | undefined> {

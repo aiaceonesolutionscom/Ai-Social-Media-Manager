@@ -1,7 +1,9 @@
 import { FastifyInstance } from 'fastify'
+
 import { listPayments, getPayment, updatePayment, getPackage, getUser, getAllConfig, setConfig } from '../../store.js'
 import { activatePackage, endPackage } from '../../lib/packageLifecycle.js'
 import { clearFeatureCache } from '../../lib/packagePermissions.js'
+import { paymentStatusTransitionAllowed } from '../../lib/paymentTransitions.js'
 import { guard } from './middleware.js'
 
 export async function registerAdminPaymentRoutes(server: FastifyInstance): Promise<void> {
@@ -83,11 +85,18 @@ export async function registerAdminPaymentRoutes(server: FastifyInstance): Promi
 
       const isLocal = existing.stripeSessionId.startsWith('local_')
 
-      // Confirm a pending local payment -> activate the package.
+      // H10 — only allow admin to mark a payment completed when it is a genuine
+      // local (manual) payment, and never allow arbitrary status writes.
       const approve = patch.status === 'completed' && existing.status === 'pending' && isLocal
 
       // Revoke a completed (auto-activated) local payment -> rollback + trust-lock the user.
       const revoked = patch.status === 'refunded' && existing.status === 'completed' && isLocal
+
+      if (!paymentStatusTransitionAllowed(existing.status as any, patch.status as any, isLocal)) {
+        return reply.status(400).send({
+          error: `Cannot change payment status from '${existing.status}' to '${patch.status ?? ''}' for ${isLocal ? 'local' : 'gateway'} payment ${id}`,
+        })
+      }
 
       if (approve) {
         const pkg = existing.packageId ? await getPackage(existing.packageId) : null
@@ -134,7 +143,7 @@ export async function registerAdminPaymentRoutes(server: FastifyInstance): Promi
     const thisMonth = completed.filter(p => {
       const d = new Date(p.createdAt)
       const now = new Date()
-      return d.getMonth() === now.getMonth() && d.getFullYear() === now.getFullYear()
+      return d.getUTCMonth() === now.getUTCMonth() && d.getUTCFullYear() === now.getUTCFullYear()
     })
     const monthRevenue = thisMonth.reduce((sum, p) => sum + p.amountCents, 0)
 

@@ -85,6 +85,52 @@ export async function activatePackage(phone: string, packageId: string, opts: { 
 }
 
 /**
+ * Pauses an active package. Tokens and expiry are kept; the scheduler stops
+ * running this user's queued jobs until the package is resumed.
+ */
+export async function pausePackage(phone: string, opts: { actor?: string; reason?: string } = {}): Promise<User> {
+  const user = await getUser(phone)
+  if (!user) throw new Error('User not found')
+  if (user.packageStatus !== 'active') throw new Error('Only an active package can be paused')
+
+  const updated = await updateUser(phone, { packageStatus: 'paused' })
+  clearFeatureCache(phone)
+
+  auditLogger.log({
+    actor: opts.actor || phone,
+    actorType: opts.actor ? 'admin' : 'user',
+    action: 'package.pause',
+    target: phone,
+    details: { package: user.packageId, reason: opts.reason },
+  })
+  logger.info({ phone, package: user.packageId }, 'package paused')
+  return updated
+}
+
+/**
+ * Resumes a paused package back to active (unless it has since expired/ended).
+ */
+export async function resumePackage(phone: string, opts: { actor?: string } = {}): Promise<User> {
+  const user = await getUser(phone)
+  if (!user) throw new Error('User not found')
+  if (user.packageStatus !== 'paused') throw new Error('Only a paused package can be resumed')
+  if (isPackageExpired(user)) throw new Error('Package has expired and cannot be resumed')
+
+  const updated = await updateUser(phone, { packageStatus: 'active' })
+  clearFeatureCache(phone)
+
+  auditLogger.log({
+    actor: opts.actor || phone,
+    actorType: opts.actor ? 'admin' : 'user',
+    action: 'package.resume',
+    target: phone,
+    details: { package: user.packageId },
+  })
+  logger.info({ phone, package: user.packageId }, 'package resumed')
+  return updated
+}
+
+/**
  * Ends a user's current package. Remaining tokens are forfeited.
  */
 export async function endPackage(phone: string, opts: { actor?: string; reason?: string } = {}): Promise<User> {

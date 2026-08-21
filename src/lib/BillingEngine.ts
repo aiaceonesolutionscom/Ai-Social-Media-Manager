@@ -1,6 +1,7 @@
 import { sql, eq, and, gte, lte } from 'drizzle-orm'
 import { getDb } from '../db.js'
 import { payments, aiUsageLogs, users, packages, tokenTransactions } from '../db/schema.js'
+import { getAllConfig } from '../store.js'
 import { logger } from './logger.js'
 
 export interface BillingSummary {
@@ -56,6 +57,16 @@ class BillingEngine {
   async getSummary(): Promise<BillingSummary> {
     const db = getDb()
 
+    // H11 — normalize PKR amounts to USD at the configured rate so fee sums
+    // never mix currencies. Gateway payments (currency='PKR') store mdr in PKR;
+    // everything else stores USD minor units.
+    const cfg = await getAllConfig()
+    const pkrRate = Number(cfg.payment_local_pkr_rate) || 0
+    const rate = pkrRate > 0 ? pkrRate : 1
+
+    const feeUsd = sql`CASE WHEN ${payments.currency} = 'PKR' THEN ROUND((COALESCE(${payments.taxAmount},0) + COALESCE(${payments.mdrAmount},0)) / ${rate}) ELSE COALESCE(${payments.taxAmount},0) + COALESCE(${payments.mdrAmount},0) END`
+    const mdrUsd = sql`CASE WHEN ${payments.currency} = 'PKR' THEN ROUND(COALESCE(${payments.mdrAmount},0) / ${rate}) ELSE COALESCE(${payments.mdrAmount},0) END`
+
     const revenueResult = await db
       .select({ total: sql<number>`COALESCE(SUM(${payments.amountCents}), 0)` })
       .from(payments)
@@ -65,7 +76,7 @@ class BillingEngine {
     const monthlyRevenueResult = await db
       .select({ total: sql<number>`COALESCE(SUM(${payments.amountCents}), 0)` })
       .from(payments)
-      .where(sql`${payments.status} = 'completed' AND to_timestamp(${payments.createdAt}, 'YYYY-MM-DD"T"HH24:MI:SS.US"') >= date_trunc('month', NOW())`)
+      .where(sql`${payments.status} = 'completed' AND ${payments.createdAt}::timestamptz >= date_trunc('month', NOW())`)
     const monthlyRevenue = Number(monthlyRevenueResult[0]?.total ?? 0)
 
     const aiCostResult = await db
@@ -76,12 +87,12 @@ class BillingEngine {
     const monthlyAICostResult = await db
       .select({ total: sql<number>`COALESCE(SUM(${aiUsageLogs.estimatedCostCents}), 0)` })
       .from(aiUsageLogs)
-      .where(sql`to_timestamp(${aiUsageLogs.createdAt}, 'YYYY-MM-DD"T"HH24:MI:SS.US"') >= date_trunc('month', NOW())`)
+      .where(sql`${aiUsageLogs.createdAt}::timestamptz >= date_trunc('month', NOW())`)
     const monthlyAICost = Number(monthlyAICostResult[0]?.total ?? 0)
 
     // Fees (payment processing + tax) — these reduce profit but are not AI cost
     const totalFeesResult = await db
-      .select({ total: sql<number>`COALESCE(SUM(${payments.taxAmount} + ${payments.mdrAmount}), 0)` })
+      .select({ total: sql<number>`COALESCE(SUM(${feeUsd}), 0)` })
       .from(payments)
       .where(eq(payments.status, 'completed'))
     const totalFees = Number(totalFeesResult[0]?.total ?? 0)
@@ -93,27 +104,27 @@ class BillingEngine {
     const totalTax = Number(totalTaxResult[0]?.total ?? 0)
 
     const totalMdrResult = await db
-      .select({ total: sql<number>`COALESCE(SUM(${payments.mdrAmount}), 0)` })
+      .select({ total: sql<number>`COALESCE(SUM(${mdrUsd}), 0)` })
       .from(payments)
       .where(eq(payments.status, 'completed'))
     const totalMdr = Number(totalMdrResult[0]?.total ?? 0)
 
     const monthlyFeesResult = await db
-      .select({ total: sql<number>`COALESCE(SUM(${payments.taxAmount} + ${payments.mdrAmount}), 0)` })
+      .select({ total: sql<number>`COALESCE(SUM(${feeUsd}), 0)` })
       .from(payments)
-      .where(sql`${payments.status} = 'completed' AND to_timestamp(${payments.createdAt}, 'YYYY-MM-DD"T"HH24:MI:SS.US"') >= date_trunc('month', NOW())`)
+      .where(sql`${payments.status} = 'completed' AND ${payments.createdAt}::timestamptz >= date_trunc('month', NOW())`)
     const monthlyFees = Number(monthlyFeesResult[0]?.total ?? 0)
 
     const monthlyTaxResult = await db
       .select({ total: sql<number>`COALESCE(SUM(${payments.taxAmount}), 0)` })
       .from(payments)
-      .where(sql`${payments.status} = 'completed' AND to_timestamp(${payments.createdAt}, 'YYYY-MM-DD"T"HH24:MI:SS.US"') >= date_trunc('month', NOW())`)
+      .where(sql`${payments.status} = 'completed' AND ${payments.createdAt}::timestamptz >= date_trunc('month', NOW())`)
     const monthlyTax = Number(monthlyTaxResult[0]?.total ?? 0)
 
     const monthlyMdrResult = await db
-      .select({ total: sql<number>`COALESCE(SUM(${payments.mdrAmount}), 0)` })
+      .select({ total: sql<number>`COALESCE(SUM(${mdrUsd}), 0)` })
       .from(payments)
-      .where(sql`${payments.status} = 'completed' AND to_timestamp(${payments.createdAt}, 'YYYY-MM-DD"T"HH24:MI:SS.US"') >= date_trunc('month', NOW())`)
+      .where(sql`${payments.status} = 'completed' AND ${payments.createdAt}::timestamptz >= date_trunc('month', NOW())`)
     const monthlyMdr = Number(monthlyMdrResult[0]?.total ?? 0)
 
     // Per-package profitability
@@ -221,15 +232,17 @@ class BillingEngine {
         COALESCE(SUM(CASE WHEN source = 'aiCost' THEN amount ELSE 0 END), 0) AS "aiCost",
         COALESCE(SUM(CASE WHEN source = 'fees' THEN amount ELSE 0 END), 0) AS "fees"
       FROM (
-        SELECT date_trunc('day', to_timestamp(created_at, 'YYYY-MM-DD"T"HH24:MI:SS.US"'))::date AS day,
+        SELECT date_trunc('day', created_at::timestamptz)::date AS day,
                amount_cents AS amount, 'revenue' AS source
         FROM payments WHERE status = 'completed'
         UNION ALL
-        SELECT date_trunc('day', to_timestamp(created_at, 'YYYY-MM-DD"T"HH24:MI:SS.US"'))::date AS day,
-               tax_amount + mdr_amount AS amount, 'fees' AS source
+        SELECT date_trunc('day', created_at::timestamptz)::date AS day,
+               CASE WHEN currency = 'PKR' THEN ROUND((COALESCE(tax_amount,0) + COALESCE(mdr_amount,0)) / ${rate})
+                    ELSE COALESCE(tax_amount,0) + COALESCE(mdr_amount,0) END AS amount,
+               'fees' AS source
         FROM payments WHERE status = 'completed'
         UNION ALL
-        SELECT date_trunc('day', to_timestamp(created_at, 'YYYY-MM-DD"T"HH24:MI:SS.US"'))::date AS day,
+        SELECT date_trunc('day', created_at::timestamptz)::date AS day,
                estimated_cost_cents AS amount, 'aiCost' AS source
         FROM ai_usage_logs
       ) combined

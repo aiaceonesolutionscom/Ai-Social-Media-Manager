@@ -105,6 +105,7 @@ export async function registerCheckoutRoutes(server: FastifyInstance): Promise<v
         packageId: pkg.slug,
         tokenCount: pkg.includedTokens,
         amountCents: pkg.priceCents,
+        currency: 'PKR',
         taxPercent: 0,
         mdrPercent: Math.round(mdrPercent),
         taxAmount: 0,
@@ -136,11 +137,8 @@ export async function registerCheckoutRoutes(server: FastifyInstance): Promise<v
     if (flow === 'mock') {
       const tokensGranted = pkg.includedTokens
 
-      await activatePackage(session.phone, pkg.slug, {
-        tokens: tokensGranted,
-        description: `Test checkout — ${pkg.name}`,
-      })
-
+      // H15 — record the payment row FIRST, then grant. A grant without a payment
+      // record is invisible to billing and untraceable.
       await createPayment({
         phone: session.phone,
         packageId: pkg.slug,
@@ -152,6 +150,11 @@ export async function registerCheckoutRoutes(server: FastifyInstance): Promise<v
         mdrAmount: 0,
         type: 'one_time',
         stripeSessionId: `test_${Date.now()}`,
+      })
+
+      await activatePackage(session.phone, pkg.slug, {
+        tokens: tokensGranted,
+        description: `Test checkout — ${pkg.name}`,
       })
 
       logger.info({ phone: session.phone, packageId: pkg.slug, tokensGranted }, 'DEV MODE: checkout granted (no Stripe configured)')

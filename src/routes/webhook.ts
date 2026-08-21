@@ -15,7 +15,9 @@ import {
   getPost,
   getUser,
   getPackage,
+  isDuplicateDelivery,
   logMessage,
+  logWebhookEvent,
   resolveUserPhone,
   setConversation,
   setStage,
@@ -54,7 +56,12 @@ async function handleButton(phone: string, buttonId: string): Promise<void> {
     }
     try {
       await setStage(postId, 'APPROVED')
-      await enqueuePublish(postId)
+      // Fire-and-forget: publishing runs in the background so the user can
+      // still cancel while it is in flight.
+      void enqueuePublish(postId).catch((err: unknown) => {
+        logger.error({ postId, error: (err as Error).message }, 'publish button failed')
+        return sendText(phone, `❌ Could not start publishing: ${(err as Error).message}`)
+      })
     } catch (err) {
       logger.error({ postId, error: (err as Error).message }, 'publish button failed')
       await sendText(phone, `❌ Could not start publishing: ${(err as Error).message}`)
@@ -96,12 +103,47 @@ async function handleButton(phone: string, buttonId: string): Promise<void> {
     return
   }
 
-  if (buttonId === 'ad_cancel') {
-    await setConversation(phone, { kind: 'idle' })
-    await sendText(phone, '❌ Ad campaign cancelled.')
-    return
-  }
-}
+   if (buttonId === 'ad_cancel') {
+     await setConversation(phone, { kind: 'idle' })
+     await sendText(phone, '❌ Ad campaign cancelled.')
+     return
+   }
+
+   // Reached from the approval "publish now or schedule?" prompt: ask for a time,
+   // then let the next user message flow through classify as a schedule_post.
+   if (buttonId === 'schedule') {
+     if (!postId) return
+     if ((await getPost(postId))?.status !== 'AWAITING_APPROVAL') {
+       await sendText(phone, 'This post is not awaiting approval right now.')
+       return
+     }
+     await sendText(phone, '⏰ When should I schedule it for? Tell me like "tomorrow 5pm" or "Sunday 6pm".')
+     return
+   }
+
+   // Reached from the post-publish "Boost with Meta Ads?" prompt. Hand off to the
+   // existing ad-gathering flow using the just-published post as the creative
+   // source. The user still supplies budget/location/audience/website — no ad is
+   // launched until they approve a preview.
+   if (buttonId === 'boost_ad') {
+     if (!postId) return
+     const post = await getPost(postId)
+     if (!post) return
+     const product = (post.intent?.topic as string) || ''
+     await setConversation(phone, {
+       kind: 'ad_gathering',
+       postId,
+       step: 'topic',
+       data: {},
+       adData: { existingPostId: postId, product } as Record<string, unknown>,
+     } as never)
+     await sendText(
+       phone,
+       '🚀 Let\'s boost this post with a Meta Ad! I\'ll need a few details first. What\'s your daily budget? (e.g. $5/day)',
+     )
+     return
+   }
+ }
 
 export async function handleWebhook(req: unknown): Promise<{ status: number; body: string }> {
   const body = req as {
@@ -121,7 +163,27 @@ export async function handleWebhook(req: unknown): Promise<{ status: number; bod
     interactive?: { type: string; button_reply?: { id: string } }
   }
 
+  // P5-2 — record every received webhook (audit trail / debugging). Best-effort;
+  // a logging failure must never break message processing.
+  try {
+    await logWebhookEvent({
+      source: 'whatsapp',
+      eventType: msg?.type ?? 'unknown',
+      payload: { from: msg?.from, msgId: msg?.id },
+      status: 'received',
+      responseCode: 200,
+    })
+  } catch (err) {
+    logger.warn({ error: (err as Error).message }, 'failed to log webhook event')
+  }
+
   const from = msg.from
+
+  // H8 — skip a duplicate/retried delivery of the same WhatsApp message id for
+  // this phone (a retry must never trigger the action twice).
+  if (isDuplicateDelivery(from, msg.id)) {
+    return { status: 200, body: 'ok' }
+  }
 
   const isButtonPress = msg.type === 'interactive' && msg.interactive?.type === 'button_reply'
   const access = await checkUserAccess(from)

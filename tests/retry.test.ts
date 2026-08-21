@@ -61,7 +61,7 @@ describe('Scenario 3 — image generation failure is retried and produces a new 
     expect(post.imageUrl).toBeDefined()
   }, 15000)
 
-  it('consecutive image failures degrade gracefully to a preview without an image', async () => {
+  it('consecutive image failures hold the draft instead of reaching approval (P1-14), then retry succeeds', async () => {
     chatJsonMock.mockResolvedValue({
       action: 'generate_post',
       intent: { topic: 'morning routine', audience: 'all', tone: 'friendly', goal: 'educate', language: 'English', emotion: 'positive' },
@@ -72,9 +72,17 @@ describe('Scenario 3 — image generation failure is retried and produces a new 
     const posts = await listPosts()
     const postId = posts[posts.length - 1].id
 
-    const post = await waitForStatus(postId, 'AWAITING_APPROVAL')
+    // The draft must NOT reach approval without an image.
+    const held = await waitForStatus(postId, 'IMAGE_FAILED')
     expect(generateImageMock).toHaveBeenCalledTimes(3)
-    expect(post.status).toBe('AWAITING_APPROVAL')
-    expect(post.imageUrl).toBe('')
+    expect(held.imageUrl).toBe('')
+    expect(held.status).toBe('IMAGE_FAILED')
+
+    // Retry now succeeds and the preview arrives with the image.
+    generateImageMock.mockResolvedValue(IMAGE_BUFFER)
+    await handleWebhook(makeTextPayload('retry', 'wamid.i3'))
+    const ready = await waitForStatus(postId, 'AWAITING_APPROVAL')
+    expect(ready.imageUrl).toBeDefined()
+    expect(ready.imageUrl).not.toBe('')
   }, 15000)
 })

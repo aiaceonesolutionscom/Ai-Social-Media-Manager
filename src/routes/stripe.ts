@@ -1,7 +1,7 @@
 import { FastifyInstance } from 'fastify'
 import { constructWebhookEvent } from '../lib/stripe.js'
-import { getUser, getPackage, getPaymentByStripeSession, claimPaymentByStripeSession, completePayment, failPayment, updateUser } from '../store.js'
-import { activatePackage } from '../lib/packageLifecycle.js'
+import { getUser, getPackage, getPaymentByStripeSession, claimPaymentByStripeSession, completePayment, failPayment, refundPayment, listPayments, updateUser } from '../store.js'
+import { activatePackage, endPackage } from '../lib/packageLifecycle.js'
 import { clearFeatureCache } from '../lib/packagePermissions.js'
 import { notifyNewUser, notifyPayment } from '../lib/notifications.js'
 import { logger } from '../lib/logger.js'
@@ -115,6 +115,56 @@ export async function registerStripeRoutes(server: FastifyInstance): Promise<voi
       case 'customer.subscription.deleted': {
         const subscription = event.data.object
         logger.info({ subscriptionId: subscription.id }, 'subscription cancelled')
+        break
+      }
+
+      case 'checkout.session.expired': {
+        // H13 — an abandoned checkout: mark the matching pending payment failed.
+        const session = event.data.object
+        const payment = await getPaymentByStripeSession(session.id)
+        if (payment && payment.status === 'pending') {
+          await failPayment(payment.id)
+          logger.info({ stripeSessionId: session.id, paymentId: payment.id }, 'checkout expired, payment marked failed')
+        }
+        break
+      }
+
+      case 'payment_intent.payment_failed': {
+        // H13 — the card was declined etc.: fail the user's newest pending payment.
+        const intent = event.data.object
+        const phone = intent.metadata?.phone as string | undefined
+        if (phone) {
+          const payments = await listPayments(phone)
+          const pending = payments.filter((p) => p.status === 'pending' && p.stripeSessionId && !p.stripeSessionId.startsWith('local_'))
+          if (pending.length > 0) {
+            await failPayment(pending[0].id)
+            logger.info({ phone, paymentId: pending[0].id }, 'payment_intent.payment_failed, payment marked failed')
+          }
+        }
+        break
+      }
+
+      case 'charge.refunded': {
+        // H13 — money was returned: mark the matching completed payment refunded
+        // and best-effort revoke the package it activated.
+        const charge = event.data.object
+        const phone = charge.metadata?.phone as string | undefined
+        const found = phone
+          ? (await listPayments(phone)).find((p) => p.status === 'completed' && p.stripeSessionId && !p.stripeSessionId.startsWith('local_'))
+          : undefined
+        if (found) {
+          try {
+            await refundPayment(found.id)
+            const user = await getUser(found.phone)
+            if (user && user.packageStatus === 'active' && user.packageId === found.packageId) {
+              await endPackage(found.phone, { actor: 'stripe', reason: `Stripe refund — payment ${found.stripeSessionId}` })
+            }
+            clearFeatureCache(found.phone)
+            logger.info({ phone, paymentId: found.id, amount: charge.amount }, 'charge refunded, payment marked refunded and package revoked')
+          } catch (err) {
+            logger.warn({ error: (err as Error).message, paymentId: found.id }, 'charge.refunded could not be fully applied')
+          }
+        }
         break
       }
 

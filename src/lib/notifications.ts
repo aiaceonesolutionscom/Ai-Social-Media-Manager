@@ -120,7 +120,7 @@ User can now access the bot.`
 
 export async function notifyPostPublished(phone: string, mediaId: string, permalink: string): Promise<NotifyResult> {
   const title = 'Post Published'
-  const body = `Your post was published to Instagram.`
+  const body = `Your post was published successfully.`
   const message = `✅ Post Published
 
 📱 User: ${phone}

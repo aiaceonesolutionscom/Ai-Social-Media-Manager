@@ -14,9 +14,10 @@ interface DataTableProps<T> {
   rowKey: (row: T) => string;
   caption: string;
   emptyMessage?: string;
+  onRowClick?: (row: T) => void;
 }
 
-export function DataTable<T>({ columns, rows, rowKey, caption, emptyMessage = 'Nothing here yet.' }: DataTableProps<T>) {
+export function DataTable<T>({ columns, rows, rowKey, caption, emptyMessage = 'Nothing here yet.', onRowClick }: DataTableProps<T>) {
   if (rows.length === 0) {
     return (
       <div className="rounded-2xl border border-dashed border-slate-200 dark:border-slate-800 p-10 text-center">
@@ -49,7 +50,13 @@ export function DataTable<T>({ columns, rows, rowKey, caption, emptyMessage = 'N
           </thead>
           <tbody className="divide-y divide-slate-100 dark:divide-slate-800 bg-white dark:bg-slate-900">
             {rows.map((row) =>
-            <tr key={rowKey(row)} className="transition-colors hover:bg-slate-50 dark:hover:bg-slate-800/60">
+            <tr
+              key={rowKey(row)}
+              onClick={onRowClick ? () => onRowClick(row) : undefined}
+              className={cn(
+                'transition-colors hover:bg-slate-50 dark:hover:bg-slate-800/60',
+                onRowClick && 'cursor-pointer'
+              )}>
                 {columns.map((col) =>
               <td key={col.key} className={cn('px-4 py-3.5 text-sm text-slate-700 dark:text-slate-300', col.className)}>
                     {col.render(row)}
@@ -66,7 +73,11 @@ export function DataTable<T>({ columns, rows, rowKey, caption, emptyMessage = 'N
         {rows.map((row) =>
         <li
           key={rowKey(row)}
-          className="rounded-2xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-4 shadow-sm">
+          onClick={onRowClick ? () => onRowClick(row) : undefined}
+          className={cn(
+            'rounded-2xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-4 shadow-sm',
+            onRowClick && 'cursor-pointer'
+          )}>
           
             <dl className="space-y-2">
               {columns.map((col) =>

@@ -19,6 +19,7 @@ export interface ChatOptions {
   json?: boolean
   temperature?: number
   phone?: string
+  maxTokens?: number
 }
 
 export interface ChatResult {
@@ -26,6 +27,8 @@ export interface ChatResult {
   tokensInput: number
   tokensOutput: number
   durationMs: number
+  finishReason?: string
+  truncated?: boolean
 }
 
 export interface ImageOptions {

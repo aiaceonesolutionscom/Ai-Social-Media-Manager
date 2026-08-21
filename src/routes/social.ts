@@ -7,6 +7,7 @@ import { sendOtpTemplate, sendText } from '../lib/whatsapp.js'
 import { generateOtp, storeOtp, verifyOtp, signState, verifyState } from '../lib/otp.js'
 import { requireFeature } from '../lib/packagePermissions.js'
 import { metaConfig } from '../lib/metaConfig.js'
+import { createShortLivedCode, consumeShortLivedCode } from '../lib/shortCode.js'
 
 function getOAuthClientId(): string {
   return metaConfig.getAppId() || config.oauth.facebook.clientId || '';
@@ -21,12 +22,19 @@ function getOAuthCallbackUrl(): string {
 }
 
 async function requireUser(req: any): Promise<string | null> {
+  // H6 — the session token must come from the Authorization header. A browser
+  // top-level redirect cannot set headers, so the frontend mints a short-lived
+  // single-use code (POST /api/social/connect/intent) and passes that instead.
   const headerToken = req.headers['authorization']?.replace('Bearer ', '') || ''
-  const queryToken = (req.query as { token?: string })?.token || ''
-  const token = headerToken || queryToken
-  if (!token) return null
-  const session = await verifySession(token)
-  return session?.phone || null
+  if (headerToken) {
+    const session = await verifySession(headerToken)
+    return session?.phone || null
+  }
+  const code = (req.query as { code?: string })?.code || ''
+  if (code) {
+    return consumeShortLivedCode(code) || null
+  }
+  return null
 }
 
 export async function registerSocialRoutes(server: FastifyInstance): Promise<void> {
@@ -58,6 +66,16 @@ export async function registerSocialRoutes(server: FastifyInstance): Promise<voi
 
     await disconnectAccount(id)
     return reply.send({ success: true })
+  })
+
+  // Mint a short-lived single-use code so the connect redirect never carries the
+  // session token in the URL. The code is redeemed by requireUser.
+  server.post('/api/social/connect/intent', async (req: any, reply: any) => {
+    const headerToken = req.headers['authorization']?.replace('Bearer ', '') || ''
+    if (!headerToken) return reply.status(401).send({ error: 'Unauthorized' })
+    const session = await verifySession(headerToken)
+    if (!session) return reply.status(401).send({ error: 'Unauthorized' })
+    return reply.send({ code: createShortLivedCode(session.phone) })
   })
 
   // ---- Facebook OAuth ----

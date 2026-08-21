@@ -9,6 +9,6 @@ export async function chat(messages: ChatMessage[], opts: { json?: boolean; temp
   return providerManager.chat(messages, opts)
 }
 
-export async function chatJson<T>(messages: ChatMessage[], opts: { temperature?: number; phone?: string } = {}): Promise<T> {
+export async function chatJson<T>(messages: ChatMessage[], opts: { temperature?: number; phone?: string; maxTokens?: number } = {}): Promise<T> {
   return providerManager.chatJson<T>(messages, opts)
 }

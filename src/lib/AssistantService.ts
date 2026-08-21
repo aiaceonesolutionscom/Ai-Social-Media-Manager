@@ -1,5 +1,14 @@
 import { listActivePackages, listActiveTopUpBundles, getConfig } from '../store.js'
 
+// H17 — short-lived response cache so repeated identical public queries do not
+// hammer the DB (dynamic package/topup blocks are rebuilt at most every 30s).
+const answerCache = new Map<string, { at: number; answer: AssistantAnswer }>()
+const ANSWER_CACHE_TTL_MS = 30 * 1000
+
+export function resetAnswerCache(): void {
+  answerCache.clear()
+}
+
 export interface KbEntry {
   id: string
   title: string
@@ -165,6 +174,12 @@ function tokenize(q: string): string[] {
 }
 
 export async function answerQuery(q: string): Promise<AssistantAnswer> {
+  const key = q.toLowerCase().trim()
+  const cached = answerCache.get(key)
+  if (cached && Date.now() - cached.at < ANSWER_CACHE_TTL_MS) {
+    return cached.answer
+  }
+
   const words = tokenize(q)
 
   if (words.length === 0) {
@@ -224,7 +239,10 @@ export async function answerQuery(q: string): Promise<AssistantAnswer> {
     .slice(0, 3)
     .map((e) => e.title)
 
-  return { topic, answer, suggestions: related }
+  const result: AssistantAnswer = { topic, answer, suggestions: related }
+  if (answerCache.size > 2000) answerCache.clear()
+  answerCache.set(key, { at: Date.now(), answer: result })
+  return result
 }
 
 export interface AssistantAnswer {

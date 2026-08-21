@@ -8,11 +8,16 @@ export const geminiImage: ImageProviderAdapter = {
   async generate(apiKey: string, baseUrl: string, model: string, prompt: string, options?: ImageOptions): Promise<ImageResult> {
     const start = Date.now()
     const modelName = model || 'gemini-2.0-flash-preview-image-generation'
-    const url = `${baseUrl.replace(/\/$/, '')}/models/${modelName}:generateContent?key=${apiKey}`
+    // P5-11 — the API key is sent as the X-Goog-Api-Key header, never as a query
+    // parameter (query params leak into access logs and history).
+    const url = `${baseUrl.replace(/\/$/, '')}/models/${modelName}:generateContent`
 
     const res = await fetchWithRetry(url, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Goog-Api-Key': apiKey,
+      },
       body: JSON.stringify({
         contents: [{ parts: [{ text: `Do NOT put any text in the image. ${prompt}` }] }],
         generationConfig: { responseModalities: ['IMAGE'] },
@@ -32,8 +37,8 @@ export const geminiImage: ImageProviderAdapter = {
     const start = Date.now()
     try {
       const modelName = model || 'gemini-2.0-flash-preview-image-generation'
-      const url = `${baseUrl.replace(/\/$/, '')}/models/${modelName}?key=${apiKey}`
-      const res = await fetchWithRetry(url, { method: 'GET' })
+      const url = `${baseUrl.replace(/\/$/, '')}/models/${modelName}`
+      const res = await fetchWithRetry(url, { method: 'GET', headers: { 'X-Goog-Api-Key': apiKey } })
       if (!res.ok) {
         const body = await res.json().catch(() => ({}))
         return { ok: false, message: `Gemini API error ${res.status}: ${JSON.stringify(body)}`, latencyMs: Date.now() - start }

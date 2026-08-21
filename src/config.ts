@@ -12,6 +12,10 @@ export const config = {
   webhookPath: process.env.WEBHOOK_PATH || '/webhooks/whatsapp',
   publicBaseUrl: required('PUBLIC_BASE_URL', { soft: true }) || 'http://localhost:8787',
   frontendUrl: required('FRONTEND_URL', { soft: true }) || 'http://localhost:5173',
+  allowedOrigins: (process.env.ALLOWED_ORIGINS || '')
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean),
   storageDir: process.env.STORAGE_DIR || './storage',
   logLevel: process.env.LOG_LEVEL || 'info',
 
@@ -57,6 +61,7 @@ export const config = {
   metaAds: {
     adAccountId: required('META_ADS_ACCOUNT_ID', { soft: true }),
     accessToken: required('META_ADS_ACCESS_TOKEN', { soft: true }),
+    pixelId: process.env.META_ADS_PIXEL_ID || '',
   },
 
   stripe: {
@@ -126,6 +131,39 @@ export const config = {
 
 export type AppConfig = typeof config
 
+/**
+ * Production-security guard: encrypted secrets (social access tokens, AI provider keys,
+ * meta config) are AES-256-GCM encrypted with a key derived from MASTER_ENCRYPTION_KEY.
+ * Without it, crypto.ts falls back to a hardcoded dev key that ships in the repo, making
+ * every "encrypted" secret decryptable. In production (DEV_MODE=false) that is
+ * unacceptable, so startup refuses to proceed. Callers must convert the thrown error into
+ * a fatal shutdown.
+ */
+export function assertProductionSecurityConfig(): void {
+  if (!config.dev.enabled && !process.env.MASTER_ENCRYPTION_KEY) {
+    throw new Error('FATAL: MASTER_ENCRYPTION_KEY is required when DEV_MODE=false. Refusing to start — encrypted secrets (social tokens, AI keys) would use the insecure hardcoded dev key.')
+  }
+
+  // P5-8 — the built-in default admin credentials are only safe for local dev.
+  // Production must ship with explicit, strong ADMIN_EMAIL / ADMIN_PASSWORD values.
+  if (
+    !config.dev.enabled &&
+    (!process.env.ADMIN_EMAIL ||
+      !process.env.ADMIN_PASSWORD ||
+      config.admin.email === 'admin@example.com' ||
+      config.admin.password === 'admin123')
+  ) {
+    throw new Error(
+      'FATAL: default admin credentials (admin@example.com / admin123) are not allowed in production. Set ADMIN_EMAIL and ADMIN_PASSWORD to strong, unique values.',
+    )
+  }
+
+  // P5-9 — the placeholder WhatsApp verify token must never be used in production.
+  if (!config.dev.enabled && config.whatsapp.verifyToken === 'change-me-verify-token') {
+    throw new Error('FATAL: WHATSAPP_VERIFY_TOKEN is still set to the placeholder "change-me-verify-token". Set a real, unique value before deploying to production.')
+  }
+}
+
 export function ensureReady(): void {
   ensureWhatsappReady()
   ensureInstagramReady()
@@ -158,4 +196,34 @@ export function ensureImageProviderReady(): void {
 
 export function ensureLLMReady(): void {
   if (!config.llm.apiKey) throw new Error('LLM_API_KEY is not set')
+}
+
+/**
+ * Returns a warning string if the Clerk publishable and secret keys appear to
+ * belong to different Clerk applications (different key payloads). When they
+ * mismatch, `verifyToken` rejects every session with 401, so this surfaces the
+ * misconfiguration loudly at startup instead of failing silently per-request.
+ */
+export function clerkKeyMismatchWarning(): string | null {
+  const { secretKey, publishableKey } = config.clerk
+  if (!secretKey || !publishableKey) return null
+
+  const issues: string[] = []
+  // Modern Clerk secret keys are opaque (their payload does NOT decode to the
+  // instance), so we can't reliably compare secret vs publishable payloads.
+  // The reliable misconfiguration is a wrong key *prefix* — e.g. a publishable
+  // key accidentally holding a secret (sk_...) value.
+  if (!/^pk_(test|live)_/.test(publishableKey)) {
+    issues.push('CLERK_PUBLISHABLE_KEY must start with "pk_" (it looks like a secret key)')
+  }
+  if (!/^sk_(test|live)_/.test(secretKey)) {
+    issues.push('CLERK_SECRET_KEY must start with "sk_"')
+  }
+  if (issues.length === 0) return null
+  return (
+    'CLERK_CONFIG_WARNING: ' +
+    issues.join('; ') +
+    '. Clerk login will fail with 401 "Invalid or expired Clerk session". ' +
+    'Use the publishable + secret key from the SAME Clerk app for frontend and backend.'
+  )
 }

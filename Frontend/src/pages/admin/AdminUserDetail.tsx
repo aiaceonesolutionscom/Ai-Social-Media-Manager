@@ -8,8 +8,9 @@ import { Button } from '../../components/ui/Button';
 import { Card } from '../../components/ui/Card';
 import { DataTable, type Column } from '../../components/ui/DataTable';
 import { notify } from '../../components/ui/Toast';
-import { apiRequest, endpoints } from '../../utils/api';
+import { apiRequest, endpoints, setUserToken } from '../../utils/api';
 import { formatDate } from '../../utils/format';
+import { useUserAuth } from '../../contexts/UserAuthContext';
 
 interface TxRow {
   id: string;
@@ -57,6 +58,7 @@ const paymentColumns: Array<Column<PaymentRow>> = [
 export function AdminUserDetail() {
   const { phone = '' } = useParams();
   const navigate = useNavigate();
+  const { refreshUser } = useUserAuth();
   const [user, setUser] = React.useState<any>(null);
   const [transactions, setTransactions] = React.useState<TxRow[]>([]);
   const [payments, setPayments] = React.useState<PaymentRow[]>([]);
@@ -129,8 +131,7 @@ export function AdminUserDetail() {
     }
   };
 
-  const toggleBranding = async (enabled: boolean) => {
-    setBrandingEnabled(enabled);
+  const toggleBranding = async (enabled: boolean) => {    setBrandingEnabled(enabled);
     try {
       await apiRequest(endpoints.adminUserBranding(user.phone), {
         method: 'PUT',
@@ -143,6 +144,21 @@ export function AdminUserDetail() {
     } catch (err) {
       setBrandingEnabled(!enabled); // Revert on error
       notify.error('Failed to update', (err as Error).message);
+    }
+  };
+
+  const impersonate = async () => {
+    if (!user) return;
+    try {
+      const data = await apiRequest<{ token: string; phone: string }>(endpoints.adminImpersonate(user.phone), {
+        method: 'POST',
+      });
+      setUserToken(data.token);
+      await refreshUser();
+      notify.success('Logged in as user', `${user.name || user.phone}'s dashboard is now open.`);
+      navigate('/dashboard');
+    } catch (err) {
+      notify.error('Failed to log in as user', (err as Error).message);
     }
   };
 
@@ -240,6 +256,9 @@ export function AdminUserDetail() {
       )}
 
       <div className="mt-6 flex flex-wrap gap-3">
+        <Button variant="secondary" onClick={impersonate}>
+          <ArrowLeftIcon className="h-4 w-4 rotate-180" aria-hidden="true" /> Login as user
+        </Button>
         <Button variant="secondary" onClick={() => navigate(`/admin/users?grant=${user.phone}`)}>
           <CoinsIcon className="h-4 w-4" aria-hidden="true" /> Grant tokens
         </Button>

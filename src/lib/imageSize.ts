@@ -21,13 +21,16 @@ export function parseImageSize(text: string | undefined): ImageSize {
 }
 
 // Provider-specific dimension/ratio values.
+// H18 — gpt-image-1-mini only accepts 1024x1024, 1536x1024, 1024x1536.
+// 9:16 has no exact gpt-image-1-mini size, so it maps to the nearest valid
+// portrait 1024x1536 (4:5/3:4 also resolve to the same valid portrait size).
 export function openaiSize(size: ImageSize): string {
   const map: Record<ImageSize, string> = {
     '1:1': '1024x1024',
     '4:5': '1024x1536',
     '3:4': '1024x1536',
     '16:9': '1536x1024',
-    '9:16': '1024x1792',
+    '9:16': '1024x1536',
   }
   return map[size]
 }

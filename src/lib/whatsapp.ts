@@ -4,6 +4,7 @@ import { fetchWithRetry } from './http.js'
 import { logger } from './logger.js'
 import { getConversation, logMessage } from '../store.js'
 import { metaConfig } from './metaConfig.js'
+import { signMediaUrl } from './mediaAuth.js'
 
 function getWhatsAppApiBase(): string {
   return `https://graph.facebook.com/${metaConfig.getWhatsAppApiVersion()}`
@@ -35,11 +36,10 @@ function mockResult(label: string): Record<string, unknown> {
   return { id: `dev_${crypto.randomUUID().slice(0, 12)}`, messaging_product: 'whatsapp' }
 }
 
-// Web-only users have canonical synthetic phone keys (u_...). The bot conversation is
-// still logged to the messages table so the website dashboard chat can show it, but there
-// is no real WhatsApp number to deliver to — skip the WhatsApp API call entirely.
+// Web-only users have canonical synthetic phone keys (u_...). Thread sessions use a
+// synthetic `thread:<id>` key — also web-only (no WhatsApp delivery, just logging).
 export function isWebOnlyPhone(to: string): boolean {
-  return to.startsWith('u_')
+  return to.startsWith('u_') || to.startsWith('thread:')
 }
 
 export async function sendText(to: string, text: string): Promise<Record<string, unknown>> {
@@ -200,6 +200,7 @@ export function verifyWebhookSignature(rawBody: string, signatureHeader: string 
 }
 
 export function localFileUrl(relPath: string): string {
-  return `${config.publicBaseUrl}/media/${encodeURIComponent(relPath.split('/').pop()!)}`
+  const file = encodeURIComponent(relPath.split('/').pop()!)
+  return signMediaUrl(file, `${config.publicBaseUrl}/media/${file}`)
 }
 

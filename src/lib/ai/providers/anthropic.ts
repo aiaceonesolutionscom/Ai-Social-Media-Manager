@@ -13,7 +13,7 @@ export const anthropicLLM: LLMProviderAdapter = {
     const body: Record<string, unknown> = {
       model,
       messages: nonSystem,
-      max_tokens: 4096,
+      max_tokens: options?.maxTokens ?? 4096,
       temperature: options?.temperature ?? 0.7,
     }
     if (systemMsg) body.system = systemMsg.content
@@ -29,6 +29,7 @@ export const anthropicLLM: LLMProviderAdapter = {
     })
     const data = (await res.json().catch(() => ({}))) as {
       content?: { type: string; text?: string }[]
+      stop_reason?: string
       usage?: { input_tokens?: number; output_tokens?: number }
       error?: unknown
     }
@@ -40,6 +41,8 @@ export const anthropicLLM: LLMProviderAdapter = {
       tokensInput: data.usage?.input_tokens ?? 0,
       tokensOutput: data.usage?.output_tokens ?? 0,
       durationMs: Date.now() - start,
+      finishReason: data.stop_reason,
+      truncated: data.stop_reason === 'max_tokens',
     }
   },
 

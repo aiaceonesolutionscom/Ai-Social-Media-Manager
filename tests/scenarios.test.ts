@@ -9,7 +9,7 @@ import { generateImage } from '../src/lib/image.js'
 import { sendImage, sendText, sendReplyButtons } from '../src/lib/whatsapp.js'
 import { transcribeAudio } from '../src/lib/stt.js'
 import type { AgentDecision, WrittenContent } from '../src/types.js'
-import { PHONE, IMAGE_BUFFER, makeTextPayload, makeButtonPayload, makeAudioPayload, waitForStatus, registerTestUser } from './helpers.js'
+import { PHONE, IMAGE_BUFFER, makeTextPayload, makeButtonPayload, makeAudioPayload, waitForStatus, registerTestUser, wait } from './helpers.js'
 
 const chatJsonMock = vi.mocked(chatJson)
 const generateFullDraftMock = vi.mocked(generateFullDraft)
@@ -108,6 +108,7 @@ describe('Scenario 1 — natural WhatsApp conversation to published Instagram po
       if (latest.includes('shorter'))
         return { action: 'edit_request', editRequest: 'make the caption shorter' }
       if (latest === 'Approve') return { action: 'approve' }
+      if (latest === 'publish now') return { action: 'approve', publishNow: true }
       return { action: 'smalltalk', reply: 'Got it!' }
     })
 
@@ -143,12 +144,27 @@ describe('Scenario 1 — natural WhatsApp conversation to published Instagram po
     expect(generateImageMock).toHaveBeenCalledTimes(1)
 
     await handleWebhook(makeTextPayload('Approve', 'wamid.g5'))
+    // A bare "Approve" asks whether to publish now or schedule — it must NOT
+    // publish immediately.
+    expect((await getPost(postId)).status).toBe('AWAITING_APPROVAL')
+    const askButtons = sendReplyButtonsMock.mock.calls[sendReplyButtonsMock.mock.calls.length - 1][2] as { id: string }[]
+    expect(askButtons.map((b) => b.id)).toEqual(expect.arrayContaining(['publish', 'schedule']))
+
+    await handleWebhook(makeTextPayload('publish now', 'wamid.g6'))
     const done = await waitForStatus(postId, 'DONE')
     expect(done.status).toBe('DONE')
     expect(done.mediaId).toBeDefined()
     expect(done.permalink).toContain('instagram.com')
     expect(done.publishedAt).toBeDefined()
-    const confirm = sendTextMock.mock.calls.find((c) => (c[1] as string).includes('Published'))
+    // The status flips to DONE a beat before the confirmation text is sent;
+    // poll briefly so the race between setStage and the sendText call never flakes.
+    const deadline = Date.now() + 3000
+    let confirm: unknown
+    while (Date.now() < deadline) {
+      confirm = sendTextMock.mock.calls.find((c) => (c[1] as string).includes('Published'))
+      if (confirm) break
+      await wait(20)
+    }
     expect(confirm).toBeDefined()
   }, 20000)
 

@@ -32,7 +32,8 @@ audience: Who the post is intended for ("young professionals", "small business o
 tone: playful, professional, inspirational, educational, funny, luxury, casual, friendly, urgent, premium. If the user explicitly provides a tone, use it.
 goal: promote product, educate, drive engagement, build brand awareness, announce offer, generate leads, drive sales, increase website traffic. Use the user's explicit goal when provided.
 language: The language in which the post should be written. If explicitly provided, use it. Otherwise default to the language/script of the user's message.
-emotion: exciting, calm, urgent, joyful, trustworthy, aspirational, curious, confident. Only infer emotion when the context supports it.
+  emotion: exciting, calm, urgent, joyful, trustworthy, aspirational, curious, confident. Only infer emotion when the context supports it.
+  platform: The platform the user explicitly asks to publish on — "instagram", "facebook", or "both". ONLY set this when the user names a specific platform in their request. Otherwise leave it empty (""). Never guess a platform the user did not mention.
 
 ==================================================
 3. USER PREFERENCES
@@ -59,7 +60,7 @@ If the current user message changes an existing value ("professional nahi casual
 ==================================================
 6. OUTPUT
 ==================================================
-Return ONLY valid JSON with keys: topic, audience, tone, goal, language, emotion. No markdown. No explanation. No additional keys.`
+Return ONLY valid JSON with keys: topic, audience, tone, goal, language, emotion, platform. No markdown. No explanation. No additional keys.`
 
 const SYSTEM_PLAN = `You are a professional social media content strategist.
 
@@ -84,11 +85,11 @@ Create a complete social media post from the supplied content brief. The output 
 1. CONTENT ACCURACY: Use only facts supplied in the content brief, user request, existing context, or brand profile. Never invent prices, discounts, statistics, testimonials, guarantees, certifications, awards, product capabilities, medical or financial outcomes.
 2. HOOK: A strong first line. Maximum 100 characters. It should be attention-grabbing without misleading clickbait.
 3. CAPTION: The main body in the requested language. Match the requested topic, audience, tone, emotion, goal. Use natural formatting. Do not repeat the same sentence unnecessarily.
+   CRITICAL: Every sentence MUST relate to or explicitly reference the supplied topic. Never write generic social-media advice that could apply to any subject (e.g. do not discuss "stress-free mornings" or "social media tips" unless that is literally the topic).
 4. CTA: One clear CTA appropriate to the goal ("Save this for later.", "Share this with a friend.", "DM us to learn more.", "Shop now.", "Book your consultation."). Do not invent URLs.
 5. EMOJIS: Use emojis naturally. Do not force emojis into every sentence. Target 3-8 relevant emojis unless the requested tone is formal/luxury/professional, where fewer may be appropriate.
 6. HASHTAGS: Generate relevant hashtags. Avoid unrelated trending hashtags, spammy hashtags, misleading hashtags, repetitive variations, or hashtags unrelated to the topic. Prefer relevance over quantity. Default range: 8-15 hashtags. If the platform-specific writer overrides this rule, follow the platform-specific rule. Return hashtags as an array of strings.
-7. SEO KEYWORDS: Return 5-8 relevant search/discovery keywords. Do not keyword-stuff the caption. Return seoKeywords as an array of strings.
-8. LANGUAGE: Hook, caption, and CTA must use the requested language. Hashtags may use natural brand/product terms where appropriate.
+7. LANGUAGE: Hook, caption, and CTA must use the requested language. Hashtags may use natural brand/product terms where appropriate.
 
 Return ONLY valid JSON:
 {
@@ -96,8 +97,7 @@ Return ONLY valid JSON:
   "caption": "string",
   "cta": "string",
   "emojis": ["emoji1", "emoji2"],
-  "hashtags": ["#example"],
-  "seoKeywords": ["keyword1", "keyword2"]
+  "hashtags": ["#example"]
 }
 No markdown. No explanation. No additional keys.`
 
@@ -109,11 +109,11 @@ FACEBOOK STYLE: conversational, authentic, community-oriented, easy to read, use
 
 HOOK: Maximum 100 characters. The hook should encourage the user to continue reading. Avoid misleading clickbait.
 CAPTION: Write in the requested language. Use short paragraphs. When appropriate, tell a small story or explain the value clearly. Do not invent facts.
+   CRITICAL: Every sentence MUST relate to or explicitly reference the supplied topic. Never write generic social-media advice that could apply to any subject.
 ENGAGEMENT: When appropriate, include one natural question that encourages comments. Do NOT force a question into every promotional post.
 CTA: Appropriate to the user's goal ("Share your thoughts below.", "Send us a message.", "Learn more.", "Book now.", "Shop now.").
 EMOJIS: Use 2-5 emojis naturally. For professional or luxury content, use fewer if appropriate.
 HASHTAGS: Use 3-5 relevant hashtags. Avoid irrelevant trending hashtags.
-SEO KEYWORDS: Return 5-8 relevant keywords as an array.
 
 Return ONLY valid JSON:
 {
@@ -121,8 +121,7 @@ Return ONLY valid JSON:
   "caption": "string",
   "cta": "string",
   "emojis": ["emoji1"],
-  "hashtags": ["#example"],
-  "seoKeywords": ["keyword1"]
+  "hashtags": ["#example"]
 }
 No markdown. No explanation. No additional keys.`
 
@@ -134,10 +133,10 @@ INSTAGRAM STYLE: visually appealing, concise, easy to scan, engaging, natural, a
 
 HOOK: Maximum 100 characters. Create a scroll-stopping but truthful first line.
 CAPTION: Default target 50-150 words. Use line breaks to improve readability. Shorter or slightly longer content is acceptable when required by the topic.
+   CRITICAL: Every sentence MUST relate to or explicitly reference the supplied topic. Never write generic social-media advice that could apply to any subject.
 CTA: Prefer actions such as "Save this for later", "Share with someone who needs this", "Comment your thoughts", "DM us", "Shop now", "Book now". Choose based on the actual goal.
 EMOJIS: Use approximately 5-10 relevant emojis naturally. Do not overuse emojis in luxury/professional content.
 HASHTAGS: Use 8-15 highly relevant hashtags by default. Prioritize niche relevance, product relevance, audience relevance, and location relevance when provided. Avoid irrelevant viral/trending hashtags.
-SEO KEYWORDS: Return 5-8 relevant keywords.
 LANGUAGE: Hook, caption and CTA must use the requested language.
 
 Return ONLY valid JSON:
@@ -146,8 +145,7 @@ Return ONLY valid JSON:
   "caption": "string",
   "cta": "string",
   "emojis": ["emoji1"],
-  "hashtags": ["#example"],
-  "seoKeywords": ["keyword1"]
+  "hashtags": ["#example"]
 }
 No markdown. No explanation. No additional keys.`
 
@@ -221,7 +219,7 @@ EDIT INTERPRETATION:
 
 PRESERVE EXISTING CONTENT: When scope is caption or both, preserve original topic, factual information, product, offer, platform, and brand information unless the user explicitly changes them. Do not unnecessarily rewrite unrelated content.
 
-TEXT OUTPUT: When text changes, provide a complete replacement content object {hook, caption, cta, emojis, hashtags, seoKeywords}. The content object must be complete — do not return only the changed sentence.
+TEXT OUTPUT: When text changes, provide a complete replacement content object {hook, caption, cta, emojis, hashtags}. The content object must be complete — do not return only the changed sentence.
 
 IMAGE OUTPUT: When image changes, provide imagePrompt describing the desired visual. Do not put social-media caption text inside imagePrompt unless the user explicitly requests text in the image.
 
@@ -230,7 +228,7 @@ FULL REGENERATION: If scope = full, provide both content and imagePrompt unless 
 USER INTENT PRIORITY: Follow the user's latest edit request. Do not let old preferences override the current request.
 
 Return ONLY valid JSON. Possible schemas:
-Caption: {"scope": "caption", "content": {"hook": "string", "caption": "string", "cta": "string", "emojis": ["emoji"], "hashtags": ["#example"], "seoKeywords": ["keyword"]}}
+Caption: {"scope": "caption", "content": {"hook": "string", "caption": "string", "cta": "string", "emojis": ["emoji"], "hashtags": ["#example"]}}
 Image: {"scope": "image", "imagePrompt": "string"}
 Both: {"scope": "both", "content": {...}, "imagePrompt": "string"}
 Full: {"scope": "full", "content": {...}, "imagePrompt": "string"}
@@ -256,15 +254,94 @@ export async function planContent(intent: Intent, phone?: string): Promise<Plann
   return chatJson<PlannedContent>(messages, { phone })
 }
 
-export async function writeContent(intent: Intent, plan: PlannedContent, prefs?: UserPreferences, brand?: BrandProfile, phone?: string): Promise<WrittenContent> {
+// P2-16 — LLM schemas return emojis/hashtags as arrays, but the pipeline's
+// canonical WrittenContent stores them as space-joined strings. Normalize on the
+// way in so caption rendering never prints "#a,#b" or a bare array.
+function asSpaceJoined(value: unknown): string {
+  if (Array.isArray(value)) return value.map((v) => String(v)).join(' ')
+  if (value === null || value === undefined) return ''
+  return String(value)
+}
+
+function asStringArray(value: unknown): string[] {
+  if (Array.isArray(value)) return value.map((v) => String(v)).filter(Boolean)
+  if (value === null || value === undefined) return []
+  return String(value)
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean)
+}
+
+export function normalizeWrittenContent(raw: Partial<WrittenContent>): WrittenContent {
+  return {
+    hook: asSpaceJoined(raw.hook),
+    caption: asSpaceJoined(raw.caption),
+    cta: asSpaceJoined(raw.cta),
+    emojis: asSpaceJoined(raw.emojis),
+    hashtags: asSpaceJoined(raw.hashtags),
+    seoKeywords: asStringArray(raw.seoKeywords),
+  }
+}
+
+// P5-GUARD — call the writer LLM with a token budget, then retry ONCE with a
+// stronger nudge if the caption is empty or hashtags are missing. This closes
+// the "no caption / no hashtags" gaps surfaced by real conversations.
+async function callWriter(
+  systemPrompt: string,
+  intent: Intent,
+  plan: PlannedContent,
+  prefs: UserPreferences | undefined,
+  brand: BrandProfile | undefined,
+  phone: string | undefined,
+  editRequest: string | undefined,
+  maxTokens: number,
+): Promise<WrittenContent> {
   const prefsContext = prefs
     ? `\nUser preferences (respect these):\n- language: ${prefs.language}\n- tone: ${prefs.tone}\n- audience: ${prefs.audience}`
     : ''
   const messages = [
-    { role: 'system' as const, content: SYSTEM_WRITER + prefsContext + buildBrandContext(brand) },
-    { role: 'user' as const, content: JSON.stringify({ intent, plan }) },
+    { role: 'system' as const, content: systemPrompt + prefsContext + buildBrandContext(brand) },
+    { role: 'user' as const, content: JSON.stringify({ intent, plan, ...(editRequest ? { editRequest } : {}) }) },
   ]
-  return chatJson<WrittenContent>(messages, { temperature: 0.8, phone })
+  return normalizeWrittenContent(await chatJson<WrittenContent>(messages, { temperature: 0.8, phone, maxTokens }))
+}
+
+function contentLooksIncomplete(content: WrittenContent): boolean {
+  if (!content.caption || content.caption.trim().length === 0) return true
+  if (!content.hashtags || content.hashtags.trim().length === 0) return true
+  return false
+}
+
+export async function writeContent(intent: Intent, plan: PlannedContent, prefs?: UserPreferences, brand?: BrandProfile, phone?: string, editRequest?: string): Promise<WrittenContent> {
+  const styleContext = await buildAuthorVoiceContext(phone)
+  const systemPrompt = SYSTEM_WRITER + styleContext
+  const content = await callWriter(systemPrompt, intent, plan, prefs, brand, phone, editRequest, 512)
+  if (contentLooksIncomplete(content)) {
+    const nudge = (editRequest ? editRequest + '\n' : '') +
+      'IMPORTANT: your previous response was incomplete. The caption must be a non-empty full sentence and you MUST include 5-10 relevant hashtags.'
+    return callWriter(systemPrompt, intent, plan, prefs, brand, phone, nudge, 768)
+  }
+  return content
+}
+
+// P5 — match the user's own writing voice. Pull a few real captions from their
+// past posts and feed them to the writer as style examples. Falls back to an
+// empty string (no influence) when there are no past posts or store is unusable.
+async function buildAuthorVoiceContext(phone?: string): Promise<string> {
+  if (!phone) return ''
+  try {
+    const { listPostsForUser, resolveUserPhone } = await import('../store.js')
+    const userPhone = await resolveUserPhone(phone)
+    const posts = (await listPostsForUser(userPhone)).slice(0, 8)
+    const examples = posts
+      .map((p) => p.content?.caption || p.transcript)
+      .filter((c): c is string => typeof c === 'string' && c.trim().length > 0)
+      .slice(0, 4)
+    if (examples.length === 0) return ''
+    return `\n\nAUTHOR VOICE — match the user's own writing style using these REAL captions from their past posts (same tone, formality, emoji use, and phrasing where natural; do not copy them verbatim):\n${examples.map((e, i) => `${i + 1}. ${e}`).join('\n')}`
+  } catch {
+    return ''
+  }
 }
 
 export async function brandCheck(caption: string, brandProfile?: BrandProfile, phone?: string): Promise<BrandCheck> {
@@ -295,13 +372,18 @@ export async function planEdit(current: { topic: string; caption: string }, edit
       content: `Current topic: ${current.topic}\nCurrent caption: ${current.caption}\n\nEdit request: ${editRequest}`,
     },
   ]
-  return chatJson<EditDecision>(messages, { temperature: 0.6, phone })
+  const decision = await chatJson<EditDecision>(messages, { temperature: 0.6, phone })
+  if (decision.content) {
+    decision.content = normalizeWrittenContent(decision.content)
+  }
+  return decision
 }
 
 export interface FullDraftOptions {
   intent?: Intent
   preferences?: UserPreferences
   brandProfile?: BrandProfile
+  editRequest?: string
 }
 
 async function writeContentForPlatform(
@@ -310,16 +392,16 @@ async function writeContentForPlatform(
   platform: 'facebook' | 'instagram',
   prefs?: UserPreferences,
   brand?: BrandProfile,
+  editRequest?: string,
 ): Promise<WrittenContent> {
   const systemPrompt = platform === 'facebook' ? SYSTEM_WRITER_FACEBOOK : SYSTEM_WRITER_INSTAGRAM
-  const prefsContext = prefs
-    ? `\nUser preferences (respect these):\n- language: ${prefs.language}\n- tone: ${prefs.tone}\n- audience: ${prefs.audience}`
-    : ''
-  const messages = [
-    { role: 'system' as const, content: systemPrompt + prefsContext + buildBrandContext(brand) },
-    { role: 'user' as const, content: JSON.stringify({ intent, plan }) },
-  ]
-  return chatJson<WrittenContent>(messages, { temperature: 0.8 })
+  const content = await callWriter(systemPrompt, intent, plan, prefs, brand, undefined, editRequest, 512)
+  if (contentLooksIncomplete(content)) {
+    const nudge = (editRequest ? editRequest + '\n' : '') +
+      `IMPORTANT: your previous response was incomplete. The ${platform} caption must be non-empty and you MUST include the platform-appropriate number of relevant hashtags.`
+    return callWriter(systemPrompt, intent, plan, prefs, brand, undefined, nudge, 768)
+  }
+  return content
 }
 
 export async function generatePlatformContent(
@@ -327,12 +409,13 @@ export async function generatePlatformContent(
   plan: PlannedContent,
   prefs?: UserPreferences,
   brand?: BrandProfile,
+  editRequest?: string,
 ): Promise<PlatformContent> {
   // Sequential (not parallel) so we fire only ONE LLM request at a time. The two
   // writers both hit the same LLM provider (e.g. Mistral) and running them in
   // parallel doubles the chance of tripping a per-minute rate limit (429).
-  const facebook = await writeContentForPlatform(intent, plan, 'facebook', prefs, brand)
-  const instagram = await writeContentForPlatform(intent, plan, 'instagram', prefs, brand)
+  const facebook = await writeContentForPlatform(intent, plan, 'facebook', prefs, brand, editRequest)
+  const instagram = await writeContentForPlatform(intent, plan, 'instagram', prefs, brand, editRequest)
   return { facebook, instagram }
 }
 
@@ -341,8 +424,8 @@ export async function generateFullDraft(post: Post, transcript: string, opts: Fu
   const imageSize: ImageSize = parseImageSize(transcript)
   intent.imageSize = imageSize
   const plan = await planContent(intent)
-  const content = await writeContent(intent, plan, opts.preferences, opts.brandProfile)
-  const platformContent = await generatePlatformContent(intent, plan, opts.preferences, opts.brandProfile)
+  const content = await writeContent(intent, plan, opts.preferences, opts.brandProfile, undefined, opts.editRequest)
+  const platformContent = await generatePlatformContent(intent, plan, opts.preferences, opts.brandProfile, opts.editRequest)
   const imagePrompt = await generateImagePrompt(intent.topic, content.caption, undefined, geminiSizePrompt(imageSize))
   return {
     ...post,

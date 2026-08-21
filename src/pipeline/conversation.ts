@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto'
 import { AsyncLocalStorage } from 'node:async_hooks'
 import { chat, chatJson } from '../lib/llm.js'
 import { logger } from '../lib/logger.js'
-import { fullCaption, platformCaption } from '../lib/caption.js'
+import { captionForPlatform, applyContentToPlatforms } from '../lib/caption.js'
 import { sendImage, sendReplyButtons, sendText, localFileUrl, isWebOnlyPhone } from '../lib/whatsapp.js'
 import { detectLanguage, staticReply, STATIC_REPLIES } from '../lib/language.js'
 import { generateImage } from '../lib/image.js'
@@ -29,10 +29,13 @@ import {
   saveEdit,
   setConversation,
   setStage,
+  setUserTimezone,
+  detectCityTimezone,
   updatePost,
 } from '../store.js'
-import type { AgentDecision, ConversationState, Intent, Post, AdConversationData } from '../types.js'
+import type { AgentDecision, ConversationState, Intent, Post, AdConversationData, PublishPlatform } from '../types.js'
 import { auditLogger } from '../lib/AuditLogger.js'
+import { resolveUserTimezone, nowInZone, formatInZone } from '../lib/timezone.js'
 
 interface PlatformInfo {
   platforms: string[]
@@ -398,9 +401,15 @@ function adDataSummary(conv: ConversationState): string {
   const lines: string[] = []
   if (adData.product) lines.push(`product: ${adData.product}`)
   if (adData.price) lines.push(`price: ${adData.price}`)
-  if (adData.budget) lines.push(`budget: $${adData.budget}/day`)
+  if (adData.budget) {
+    const currency = (adData.currency || 'USD').toUpperCase()
+    const period = adData.budgetType === 'total' ? 'lifetime' : 'per day'
+    lines.push(`budget: ${currency} ${adData.budget}/${period}`)
+  }
   if (adData.location) lines.push(`location: ${adData.location}`)
   if (adData.audience) lines.push(`audience: ${adData.audience}`)
+  if (adData.startDate) lines.push(`start date: ${adData.startDate}`)
+  if (adData.endDate) lines.push(`end date: ${adData.endDate}`)
   if (adData.websiteUrl) lines.push(`website: ${adData.websiteUrl}`)
   if (adData.existingPostId) lines.push(`creative post: ${adData.existingPostId}`)
   return lines.length > 0 ? lines.join('\n') : 'no details collected yet'
@@ -412,10 +421,14 @@ function mergeAdData(existing: AdConversationData | undefined, newData: AdConver
   return { ...base, ...Object.fromEntries(Object.entries(updates).filter(([_, v]) => v != null && v !== '')) }
 }
 
-function getMissingAdFields(adData: AdConversationData): string[] {
+export function getMissingAdFields(adData: AdConversationData): string[] {
   const missing: string[] = []
   if (!adData.product) missing.push('product/service to advertise')
   if (!adData.budget) missing.push('daily budget')
+  // Never guess the audience or location for an ad — Meta charges real money
+  // per impression, so targeting must be stated by the user, not invented.
+  if (!adData.location) missing.push('target location (city/country)')
+  if (!adData.audience) missing.push('target audience (who should see this ad)')
   return missing
 }
 
@@ -481,6 +494,67 @@ async function resolveCreativePost(
   return owned[0]
 }
 
+// P4 — create a NEW post seeded from a previous one (caption + image + intent),
+// leaving the original untouched. The user gets a draft they can edit/publish.
+async function handleReusePost(phone: string, targetPostId: string): Promise<void> {
+  const userPhone = await resolveUserPhone(phone)
+  const owned = await listPostsForUser(userPhone)
+  const source = owned.find((p) => p.id === targetPostId)
+  if (!source) {
+    await safeSend(phone, "I couldn't find that post under your account. Which one did you mean?")
+    return
+  }
+  const newPost = await createPost(phone)
+  await updatePost(newPost.id, {
+    transcript: source.transcript || '',
+    intent: source.intent || undefined,
+    content: source.content || undefined,
+    imagePrompt: source.imagePrompt || undefined,
+    imagePath: source.imagePath || undefined,
+    imageUrl: source.imageUrl || undefined,
+    status: 'AWAITING_APPROVAL',
+  })
+  await setConversation(phone, { kind: 'awaiting_approval', postId: newPost.id })
+  const preview = (source.content?.caption || source.transcript || 'your previous post').slice(0, 60)
+  await safeSend(phone, `📋 I've prepared a new post based on your previous one ("${preview}..."). Review it and tell me any changes, or say "publish" to send it.`)
+}
+
+// P4 — create a NEW draft ad campaign seeded from a previous one (creative +
+// targeting + budget), leaving the original untouched and NOT launching it.
+async function handleReuseAd(phone: string, targetAdId: string): Promise<void> {
+  const userPhone = await resolveUserPhone(phone)
+  const { listAdCampaignsByPhone, getAdCampaignByPhone, createAdCampaign } = await import('../store.js')
+  const owned = await listAdCampaignsByPhone(userPhone)
+  const source = owned.find((a) => a.id === targetAdId) || (await getAdCampaignByPhone(targetAdId, phone))
+  if (!source) {
+    await safeSend(phone, "I couldn't find that ad under your account. Which campaign did you mean?")
+    return
+  }
+  const campaign = await createAdCampaign({
+    phone,
+    name: `${source.name} (copy)`,
+    objective: source.objective,
+    adContent: source.adContent,
+    targeting: source.targeting,
+    budgetCents: source.budgetCents,
+    budgetType: source.budgetType,
+    currency: source.currency,
+    startDate: source.startDate,
+    endDate: source.endDate,
+    imageUrl: source.imageUrl,
+  })
+  await setConversation(phone, { kind: 'ad_preview', postId: campaign.id, adData: { existingPostId: source.postId || '' } } as any)
+  const budgetLabel = new Intl.NumberFormat('en-US', { style: 'currency', currency: source.currency, maximumFractionDigits: 0 }).format(source.budgetCents / 100)
+  await sendImage(phone, campaign.imageUrl || '', `**${campaign.adContent.headline}**\n\n${campaign.adContent.primaryText}`)
+  await sendText(phone, `💰 Budget: ${budgetLabel}/day\n📋 Objective: ${String(source.objective).replace('OUTCOME_', '')}\n🌐 Website: ${campaign.adContent.linkUrl || 'not set'}`)
+  await sendReplyButtons(phone, 'This is a draft copy of your previous ad. What would you like to do?', [
+    { id: 'ad_approve', title: '✅ Approve' },
+    { id: 'ad_edit', title: '✏️ Edit' },
+    { id: 'ad_schedule', title: '📅 Schedule' },
+    { id: 'ad_cancel', title: '❌ Cancel' },
+  ])
+}
+
 async function historyBlock(phone: string, limit = 12): Promise<string> {
   const msgs = (await getMessages(phone)).slice(-limit)
   const conv = await getConversation(phone)
@@ -544,9 +618,10 @@ async function buildEntityIndex(phone: string): Promise<string> {
 
 async function assembleSystem(situation: string, phone: string, post?: Post): Promise<string> {
   const prefs = await getUserPreferences(phone)
+  const tz = await resolveUserTimezone(phone)
   const pi = await getPlatformInfo(phone)
   const prefsBlock = prefs
-    ? `USER PREFERENCES (apply unless user says otherwise):\n- language: ${prefs.language ?? 'not set'}\n- tone: ${prefs.tone ?? 'not set'}\n- audience: ${prefs.audience ?? 'not set'}\n- brand voice: ${prefs.brandVoice ?? 'not set'}`
+    ? `USER PREFERENCES (apply unless user says otherwise):\n- language: ${prefs.language ?? 'not set'}\n- tone: ${prefs.tone ?? 'not set'}\n- audience: ${prefs.audience ?? 'not set'}\n- brand voice: ${prefs.brandVoice ?? 'not set'}\n- timezone: ${tz}`
     : 'USER PREFERENCES: none set'
   return `${CORE_SYSTEM}
 
@@ -566,19 +641,21 @@ ${prefsBlock}
 RECENT CONVERSATION:
 ${await historyBlock(phone)}
 
-CURRENT TIME: ${new Date().toISOString()} (UTC)
+CURRENT TIME: ${nowInZone(tz)}
 
 Decide the user's intended action from their latest message. Return ONLY a JSON object:
 {
-   "action": "smalltalk" | "ask_question" | "generate_post" | "edit_request" | "approve" | "regenerate" | "cancel_publish" | "new_post" | "create_ad" | "continue_ad" | "edit_ad" | "launch_ad" | "cancel_ad" | "pause_ad" | "resume_ad" | "stop_ad" | "use_post_as_ad" | "add_platform" | "switch_platform" | "schedule_post" | "toggle_branding" | "status_check" | "unclear",
+   "action": "smalltalk" | "ask_question" | "generate_post" | "edit_request" | "approve" | "publish_now" | "regenerate" | "cancel_publish" | "new_post" | "create_ad" | "manual_ad" | "continue_ad" | "edit_ad" | "launch_ad" | "cancel_ad" | "pause_ad" | "resume_ad" | "stop_ad" | "use_post_as_ad" | "reuse_post" | "reuse_ad" | "add_platform" | "switch_platform" | "schedule_post" | "toggle_branding" | "status_check" | "unclear",
   "reply": "a short, natural response to send (optional)",
   "question": "the single next question to ask (only for ask_question)",
   "intent": { "topic": "", "audience": "", "tone": "", "goal": "", "language": "", "emotion": "" },
   "editRequest": "a concise paraphrase of the requested edit (only for edit_request)",
-  "scheduleAt": "the time the user wants the draft published (only for schedule_post)",
-  "brandingOn": true,
+   "scheduleAt": "the time the user wants the draft published (only for schedule_post)",
+   "publishNow": "true ONLY when the user explicitly says to publish/send the post NOW (e.g. 'publish now','post it','send it now'). Leave false for a bare 'approve' so the assistant asks whether to publish now or schedule. Ignored for other actions.",
+   "brandingOn": true,
    "adData": { "product": "", "productDescription": "", "price": "", "audience": "", "location": "", "budget": 0, "budgetType": "", "currency": "", "startDate": "", "endDate": "", "websiteUrl": "", "existingPostId": "" },
-  "platform": "instagram" | "facebook" | "both",
+   "platform": "instagram" | "facebook" | "both",
+   "publishNow": false,
   "targetPostId": "the id from ENTITY INDEX when the user refers to a specific past post",
   "targetAdId": "the id from ENTITY INDEX when the user refers to a specific past ad"
 }
@@ -589,6 +666,8 @@ ACTION RULES:
 - "launch_ad": ad is ready, user confirms they want to launch it.
 - "cancel_ad": user wants to cancel the ad campaign.
 - "use_post_as_ad": user wants to use an existing post as ad creative. Set existingPostId (and/or targetPostId) to that post's id from ENTITY INDEX.
+- "reuse_post": user wants to create a NEW post based on a previous post (e.g. "make a new post like my last one", "reuse post #2", "is tarah ki aur post banao"). Set targetPostId to that post's id from ENTITY INDEX. The backend seeds a new draft from it (same caption/image) for the user to review/edit — it must NOT modify the original post.
+- "reuse_ad": user wants to create a NEW ad campaign based on a previous ad (e.g. "reuse this ad", "is ad ki copy banao", "run a similar campaign"). Set targetAdId to that ad's id from ENTITY INDEX. The backend seeds a new draft campaign from it for review — it must NOT modify or relaunch the original.
 - "add_platform": user wants to add another platform (e.g. "also put it on Facebook"). Set platform field.
 - "switch_platform": user wants to change platform (e.g. "make it Facebook instead"). Set platform field.
 - "approve": user approves the current draft or ad for publishing/launching.
@@ -720,6 +799,34 @@ async function safeGenerateImage(prompt: string, phone?: string, size?: string):
   throw lastErr
 }
 
+// P1-14 — retry image generation for a draft held in IMAGE_FAILED. On success
+// the draft moves to AWAITING_APPROVAL with the image attached; on failure it
+// stays in the retry loop.
+async function retryImageGeneration(phone: string, postId: string): Promise<void> {
+  await setConversation(phone, { kind: 'generating', postId })
+  const post = (await getPost(postId))!
+  try {
+    const hasImageGen = await checkPackageFeature(phone, 'image_generation')
+    if (!hasImageGen) {
+      await safeSend(phone, '❌ Image generation is not included in your package. Please upgrade to continue.')
+      await setConversation(phone, { kind: 'idle', postId })
+      return
+    }
+    const imageBuffer = await safeGenerateImage(post.imagePrompt!, phone, post.imageSize)
+    const relPath = saveImageBuffer(imageBuffer, postId)
+    const url = localFileUrl(relPath)
+    await setStage(postId, 'IMAGE', { imagePath: relPath, imageUrl: url })
+    await setStage(postId, 'AWAITING_APPROVAL')
+    await setConversation(phone, { kind: 'awaiting_approval', postId })
+    await sendPreview(phone, (await getPost(postId))!)
+  } catch (err) {
+    logger.warn({ postId, error: (err as Error).message }, 'image retry failed — holding draft')
+    await setStage(postId, 'IMAGE_FAILED', { imagePath: '', imageUrl: '' })
+    await setConversation(phone, { kind: 'image_retry', postId })
+    await safeSend(phone, '🖼️ The image could not be generated yet. Reply "retry" to try again, or "cancel" to stop.')
+  }
+}
+
 // Charge the configured image_regenerate cost before regenerating/editing an image.
 // Refund is handled by the caller on failure. Uses the canonical user phone.
 // Each regenerate/edit ATTEMPT gets its own stable operation id
@@ -823,16 +930,29 @@ async function handleBrandingToggle(phone: string, postId: string, add: boolean)
 export async function sendPreview(phone: string, post: Post, warning?: string): Promise<void> {
   const pi = await getPlatformInfo(phone)
   const url = post.imageUrl!
+  // P2-13 — if the user asked for a specific platform, preview exactly that
+  // version instead of defaulting to whatever accounts happen to be connected.
+  const preferred = (post.platforms ?? []).filter((p): p is 'instagram' | 'facebook' => p === 'instagram' || p === 'facebook')
+  const targets = preferred.length > 0
+    ? preferred
+    : pi.platforms.filter((p): p is 'instagram' | 'facebook' => p === 'instagram' || p === 'facebook')
 
-  // Use platform-specific caption if available, fallback to default
-  if (pi.platforms.length > 1 && post.platformContent?.facebook && post.platformContent?.instagram) {
-    // Show Instagram preview first (primary)
-    const igCaption = platformCaption(post.platformContent.instagram, 'instagram')
-    await sendImage(phone, url, igCaption)
-    await sendText(phone, `📱 **Instagram version** shown above.\n\nYour Facebook version will have a different caption optimized for Facebook.\n\nBoth will be published when you approve.`)
+  // The caption shown must be EXACTLY what publish sends for that platform
+  // (captionForPlatform is the single source used by publish too).
+  if (targets.length > 1) {
+    const primary = targets[0]
+    await sendImage(phone, url, captionForPlatform(post, primary))
+    await sendText(phone, `📱 **${primary === 'instagram' ? 'Instagram' : 'Facebook'} version** shown above.\n\nYour ${targets[1] === 'instagram' ? 'Instagram' : 'Facebook'} version will have a different caption optimized for that platform.\n\nBoth will be published when you approve.`)
+  } else if (targets.length === 1) {
+    await sendImage(phone, url, captionForPlatform(post, targets[0]))
   } else {
-    const caption = fullCaption(post.content!)
-    await sendImage(phone, url, caption)
+    await sendImage(phone, url, captionForPlatform(post, 'instagram'))
+  }
+
+  // P2-15 — surface the strategist's suggested time so it isn't generated and
+  // silently dropped.
+  if (post.plan?.suggestedTime) {
+    await sendText(phone, `⏰ **Suggested posting time:** ${post.plan.suggestedTime}\n\nThis is just a recommendation — you decide when to publish.`)
   }
 
   await sendText(phone, REVIEW_MESSAGE_TEMPLATE(pi.allLabel))
@@ -844,7 +964,27 @@ export async function sendPreview(phone: string, post: Post, warning?: string): 
   ])
 }
 
-async function runPipeline(phone: string, postId: string, sourceText: string, intentOverride?: Partial<Intent> | Intent): Promise<void> {
+// P5-TOPIC — does the generated caption actually reference the requested topic?
+// Splits the topic into meaningful words (>=3 chars) and checks whether any
+// (singular or plural) appears in the caption. Catches the "generic social-media
+// advice" drift where the model ignores the user's subject entirely.
+//
+// NOTE: when every topic word is short (e.g. "ai dog"), the >=3 filter yields no
+// tokens. In that case we MUST NOT auto-pass — instead fall back to a plain
+// substring match on the whole topic so genuine drift is still caught.
+export function captionMentionsTopic(caption: string, topic: string): boolean {
+  if (!caption || !topic) return true
+  const haystack = caption.toLowerCase()
+  const topicLower = topic.toLowerCase()
+  const tokens = topicLower.split(/[^a-z0-9]+/i).filter((w) => w.length >= 3)
+  if (tokens.length > 0) {
+    return tokens.some((t) => haystack.includes(t) || haystack.includes(t.replace(/s$/, '')))
+  }
+  // No long tokens — fall back to a direct substring check on the full topic.
+  return haystack.includes(topicLower)
+}
+
+async function runPipeline(phone: string, postId: string, sourceText: string, intentOverride?: Partial<Intent> | Intent, editRequest?: string): Promise<void> {
   const post = (await getPost(postId))!
   const prefs = await getUserPreferences(phone)
   const brandProfile = await getBrandProfile(phone)
@@ -861,11 +1001,49 @@ async function runPipeline(phone: string, postId: string, sourceText: string, in
   try {
     const fullIntent = intentOverride && intentOverride.topic ? (intentOverride as unknown as Intent) : undefined
     await setStage(postId, 'INTENT')
-    const draft = await generateFullDraft(post, sourceText, {
+    let draft = await generateFullDraft(post, sourceText, {
       intent: fullIntent,
       preferences: prefs,
       brandProfile: brand,
+      editRequest,
     })
+    // P5-TOPIC — root-cause guard against off-topic/generic captions. If the
+    // generated copy doesn't actually mention the requested topic, regenerate
+    // ONCE with an explicit topic nudge before sending anything to the user.
+    // The guard must inspect BOTH the canonical base caption AND every
+    // platform-specific caption, because sendPreview surfaces platform content
+    // (captionForPlatform prefers post.platformContent[platform]) — an
+    // off-topic platform writer would otherwise slip past the guard.
+    // Only applied on the INITIAL generation (no editRequest): edit regenerations
+    // already carry the user's editRequest and a previously on-topic draft.
+    const topic = draft.intent?.topic
+    if (topic && !editRequest) {
+      const captionsToCheck = [
+        draft.content?.caption ?? '',
+        draft.platformContent?.instagram?.caption ?? '',
+        draft.platformContent?.facebook?.caption ?? '',
+      ]
+      const offTopic = captionsToCheck.some((c) => !captionMentionsTopic(c, topic))
+      if (offTopic) {
+        logger.warn({ postId, topic }, 'Generated caption appears off-topic (base or platform copy) — regenerating with topic nudge')
+        draft = await generateFullDraft(post, sourceText, {
+          intent: draft.intent,
+          preferences: prefs,
+          brandProfile: brand,
+          editRequest: `The previous draft was off-topic. Write content specifically and only about this topic: "${topic}". Do NOT write generic social-media advice. Every sentence must reference this topic.`,
+        })
+      }
+    }
+    // P2-13 — persist the platform the user explicitly asked for (if any) so
+    // the preview and downstream tooling can honor it.
+    const intentPlatform = draft.intent?.platform
+    const platforms: PublishPlatform[] | undefined = intentPlatform === 'instagram'
+      ? ['instagram']
+      : intentPlatform === 'facebook'
+        ? ['facebook']
+        : intentPlatform === 'both'
+          ? ['instagram', 'facebook']
+          : undefined
     await setStage(postId, 'WRITTEN', {
       transcript: sourceText,
       intent: draft.intent,
@@ -873,6 +1051,8 @@ async function runPipeline(phone: string, postId: string, sourceText: string, in
       content: draft.content,
       imagePrompt: draft.imagePrompt,
       imageSize: draft.imageSize,
+      ...(platforms ? { platforms } : {}),
+      ...(draft.platformContent ? { platformContent: draft.platformContent } : {}),
     })
 
     await setStage(postId, 'CHECKED')
@@ -884,18 +1064,26 @@ async function runPipeline(phone: string, postId: string, sourceText: string, in
     if (!bc.passed) {
       brandWarning = `⚠️ **Brand check flagged this draft** (${bc.policy || 'review recommended'}). Nothing will be published until you approve — you can edit it first if you'd like.`
     }
-    await setStage(postId, 'CHECKED', { content: finalContent, brandCheck: bc })
+    // A brand fix must reach EVERY platform copy the publisher may prefer, not
+    // just the base caption. But when nothing changed, leave the writers'
+    // platform-specific copy intact instead of overwriting it with the base.
+    const brandFixed = bc.fixedCaption ? finalContent.caption !== draftPost.content!.caption : false
+    const platformContentAfterCheck = brandFixed ? applyContentToPlatforms(draftPost, finalContent) : undefined
+    await setStage(postId, 'CHECKED', {
+      content: finalContent,
+      ...(platformContentAfterCheck ? { platformContent: platformContentAfterCheck } : {}),
+      brandCheck: bc,
+    })
 
     await setStage(postId, 'IMAGE')
     const imgPost = (await getPost(postId))!
-    let imageBuffer: Buffer | null = null
     try {
       const hasImageGen = await checkPackageFeature(phone, 'image_generation')
       if (!hasImageGen) {
         logger.warn({ postId }, 'Image generation not in package — proceeding without image')
         await setStage(postId, 'IMAGE', { imagePath: '', imageUrl: '' })
       } else {
-        imageBuffer = await safeGenerateImage(imgPost.imagePrompt!, phone, imgPost.imageSize)
+        let imageBuffer = await safeGenerateImage(imgPost.imagePrompt!, phone, imgPost.imageSize)
         if (brand && (brand as any)?.logoPath) {
           imageBuffer = await applyBrandLogo(imageBuffer, (brand as any).logoPath)
         }
@@ -904,8 +1092,13 @@ async function runPipeline(phone: string, postId: string, sourceText: string, in
         await setStage(postId, 'IMAGE', { imagePath: relPath, imageUrl: url })
       }
     } catch (imgErr) {
-      logger.warn({ postId, error: (imgErr as Error).message }, 'Image generation failed — proceeding without image')
-      await setStage(postId, 'IMAGE', { imagePath: '', imageUrl: '' })
+      // P1-14 — an image-less draft must never reach approval (it cannot be
+      // published). Hold the draft in IMAGE_FAILED and let the user retry.
+      logger.warn({ postId, error: (imgErr as Error).message }, 'Image generation failed — holding draft for retry')
+      await setStage(postId, 'IMAGE_FAILED', { imagePath: '', imageUrl: '' })
+      await setConversation(phone, { kind: 'image_retry', postId })
+      await safeSend(phone, '🖼️ Sorry — I could not generate the image for this post. Reply "retry" to try again, or "cancel" to stop.')
+      return
     }
 
     await setStage(postId, 'AWAITING_APPROVAL')
@@ -939,14 +1132,30 @@ async function runPipeline(phone: string, postId: string, sourceText: string, in
 }
 
 // The classifier now returns scheduleAt as an ISO-8601 UTC timestamp. Use it
-// directly when it's valid and in the future; otherwise let the LLM convert.
-async function resolveScheduleIso(value: string): Promise<string | null> {
+// directly when it's valid and in the future; otherwise let the LLM convert,
+// honouring the user's timezone.
+async function resolveScheduleIso(value: string, timezone = 'UTC'): Promise<string | null> {
   const isoRe = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2}(\.\d+)?)?(Z|[+-]\d{2}:\d{2})?$/
   if (isoRe.test(value.trim())) {
     const d = new Date(value)
     if (!Number.isNaN(d.getTime()) && d > new Date()) return d.toISOString()
   }
-  return normalizeScheduleTime(value)
+  return normalizeScheduleTime(value, timezone)
+}
+
+// P5-TZ — ensure we know the user's timezone before interpreting any schedule
+// phrase. We opportunistically learn it from the current message (e.g. "india",
+// "Karachi", "Pakistan time"); if it's still unset we fall back to UTC but flag
+// it so the caller can gently ask the user once to set it.
+async function ensureTimezone(phone: string, message: string): Promise<{ tz: string; needsPrompt: boolean }> {
+  const current = await resolveUserTimezone(phone)
+  if (current && current !== 'UTC') return { tz: current, needsPrompt: false }
+  const detected = detectCityTimezone(message)
+  if (detected) {
+    await setUserTimezone(phone, detected)
+    return { tz: detected, needsPrompt: false }
+  }
+  return { tz: 'UTC', needsPrompt: true }
 }
 
 async function handleSchedule(phone: string, postId: string, rawTime: string | undefined): Promise<void> {
@@ -955,15 +1164,17 @@ async function handleSchedule(phone: string, postId: string, rawTime: string | u
     await safeSend(phone, '❌ Scheduled publishing is not included in your current plan. Please upgrade your package to use this feature.')
     return
   }
-  const iso = rawTime ? await resolveScheduleIso(rawTime) : null
+  const { tz, needsPrompt } = await ensureTimezone(phone, rawTime || '')
+  const iso = rawTime ? await resolveScheduleIso(rawTime, tz) : null
   if (!iso) {
     await safeSend(phone, '🕐 Sure! What time should I publish it? For example "in 2 hours", "tomorrow at 5pm", "5:00 PM", "15 August at 9am", or "Monday 6 baje".')
     return
   }
   const result = await schedulePost(postId, phone, iso)
   await setConversation(phone, { kind: 'idle', postId })
-  const when = new Date(iso).toLocaleString()
+  const when = formatInZone(iso, tz)
   await safeSend(phone, result === 'rescheduled' ? `✅ Rescheduled! Your post will now publish on ${when}.` : `✅ Scheduled! Your post will be published automatically on ${when}.`)
+  if (needsPrompt) await safeSend(phone, '⏰ Note: aapka timezone UTC set hai — ek baar city bataein (e.g. "Karachi") taake aage ka time sahi set ho.')
 }
 
 async function sendStatusSummary(phone: string): Promise<void> {
@@ -974,11 +1185,12 @@ async function sendStatusSummary(phone: string): Promise<void> {
     getScheduledPosts(userPhone).catch(() => []),
   ])
   const lines: string[] = ['📊 Yahan aapka current status hai:']
+  const tz = await resolveUserTimezone(phone)
   if (scheduled.length > 0) {
     lines.push('')
     lines.push('🕐 **Upcoming scheduled posts:**')
     for (const s of scheduled.slice(0, 5)) {
-      lines.push(`• ${new Date(s.publishAt).toLocaleString()} — ${s.caption?.slice(0, 60) || 'Post'}`)
+      lines.push(`• ${formatInZone(s.publishAt, tz)} — ${s.caption?.slice(0, 60) || 'Post'}`)
     }
   }
   const recentPosts = posts.slice(0, 5)
@@ -1025,8 +1237,9 @@ async function handleEdit(phone: string, postId: string, editRequest: string): P
     if (decision.scope === 'full') {
       const attempt = await chargeImageRegenerate(phone, postId)
       if (!attempt.charged) return
+      await saveEdit(postId, editRequest, JSON.stringify(post.content))
       await setStage(postId, 'INTENT')
-      await runPipeline(phone, postId, post.transcript ?? post.content.caption, undefined)
+      await runPipeline(phone, postId, post.transcript ?? post.content.caption, undefined, editRequest)
       const after = await getPost(postId)
       if (after && after.status === 'FAILED') {
         await refundImageRegenerate(phone, postId, attempt.attemptId)
@@ -1035,9 +1248,14 @@ async function handleEdit(phone: string, postId: string, editRequest: string): P
     }
 
     let content = post.content
+    let platformContent = post.platformContent
     if (decision.content) {
       content = decision.content
-      await setStage(postId, 'WRITTEN', { content })
+      platformContent = applyContentToPlatforms(post, content)
+      await setStage(postId, 'WRITTEN', {
+        content,
+        ...(platformContent ? { platformContent } : {}),
+      })
     }
 
     const bc = await brandCheck(content.caption, brand)
@@ -1047,7 +1265,12 @@ async function handleEdit(phone: string, postId: string, editRequest: string): P
     if (!bc.passed) {
       brandWarning = `⚠️ **Brand check flagged this draft** (${bc.policy || 'review recommended'}). Nothing will be published until you approve — you can edit it first if you'd like.`
     }
-    await setStage(postId, 'CHECKED', { content: finalContent, brandCheck: bc })
+    platformContent = applyContentToPlatforms({ ...post, platformContent }, finalContent)
+    await setStage(postId, 'CHECKED', {
+      content: finalContent,
+      ...(platformContent ? { platformContent } : {}),
+      brandCheck: bc,
+    })
 
     if (decision.scope === 'image' || decision.imagePrompt) {
       const attempt = await chargeImageRegenerate(phone, postId)
@@ -1133,6 +1356,10 @@ export async function handleUserInput(
       } else if (convKind === 'ad_gathering') {
         await setConversation(phone, { kind: 'idle' })
         await safeSend(phone, '✅ Ad creation cancelled. Just say "create an ad" when you\'re ready!')
+      } else if (convKind === 'image_retry') {
+        await setStage((conv as { postId: string }).postId, 'CANCELLED')
+        await setConversation(phone, { kind: 'idle' })
+        await safeSend(phone, '✅ Post cancelled. Tell me what you\'d like to create next!')
       }
       return
     }
@@ -1188,11 +1415,13 @@ if (convKind === 'ad_gathering' || convKind === 'ad_preview') {
       }
       if (d.action === 'schedule_post' && d.scheduleAt) {
         const { updateAdCampaign } = await import('../store.js')
-        const iso = await resolveScheduleIso(d.scheduleAt)
+        const { tz, needsPrompt } = await ensureTimezone(phone, content)
+        const iso = await resolveScheduleIso(d.scheduleAt, tz)
         if (iso) {
           await updateAdCampaign(conv.postId, { status: 'scheduled', publishAt: iso })
           await setConversation(phone, { kind: 'idle' })
-          await safeSend(phone, `✅ Ad scheduled! It will launch on ${new Date(iso).toLocaleString()}.`)
+          await safeSend(phone, `✅ Ad scheduled! It will launch on ${formatInZone(iso, tz)}.`)
+          if (needsPrompt) await safeSend(phone, '⏰ Note: aapka timezone UTC set hai — ek baar city bataein (e.g. "Karachi") taake aage ka time sahi set ho.')
         } else {
           await respond(phone, { key: 'whatToPost', userText: content, instruction: 'Ask what time the ad should launch. Be natural.', fallback: 'What time should the ad launch? You can give any time or date.' })
         }
@@ -1365,7 +1594,20 @@ if (convKind === 'ad_gathering' || convKind === 'ad_preview') {
       return
     }
 
+    // P5-TZ — learn the user's timezone from casual mentions ("india", "Karachi",
+    // "Pakistan time") so later schedule phrases resolve to their local clock.
+    const tzHint = detectCityTimezone(content)
+    if (tzHint) await setUserTimezone(phone, tzHint)
+
     const d = await classify(phone, `No draft in progress. The user may want to start a new ${pi.allLabel} post or just chat.`, undefined, content)
+    if (d.action === 'reuse_post' && d.targetPostId) {
+      await handleReusePost(phone, d.targetPostId)
+      return
+    }
+    if (d.action === 'reuse_ad' && d.targetAdId) {
+      await handleReuseAd(phone, d.targetAdId)
+      return
+    }
     if (d.action === 'pause_ad' || d.action === 'resume_ad' || d.action === 'stop_ad') {
       const adId = d.targetAdId
       if (!adId) {
@@ -1394,7 +1636,7 @@ if (convKind === 'ad_gathering' || convKind === 'ad_preview') {
       }
       return
     }
-    if (d.action === 'create_ad' || d.action === 'use_post_as_ad') {
+    if (d.action === 'create_ad' || d.action === 'manual_ad' || d.action === 'use_post_as_ad') {
       if (!pi.hasAdCampaigns) {
         await safeSend(phone, '❌ Meta Ads is not included in your current plan. Please upgrade your package to use this feature.')
         return
@@ -1422,8 +1664,37 @@ if (convKind === 'ad_gathering' || convKind === 'ad_preview') {
       return
     }
     if (d.action === 'add_platform' || d.action === 'switch_platform') {
-      // No active post to add platform to
-      await safeSend(phone, 'There\'s no active post to change platforms for. Let me know what you\'d like to post about first!')
+      // P5-STATE — after scheduling/approve the conversation can drop back to
+      // idle with no postId. Resolve the user's most recent draft instead of
+      // bailing out, so "facebook pai akrni hai" still works.
+      let platformPostId = conv.postId
+      let platformPost = platformPostId ? await getPost(platformPostId) : undefined
+      if (!platformPost) {
+        const recent = (await listPostsForUser(await resolveUserPhone(phone)))
+          .slice()
+          .sort((a, b) => (b.createdAt || '').localeCompare(a.createdAt || ''))[0]
+        if (recent) {
+          platformPost = recent
+          platformPostId = recent.id
+        }
+      }
+      if (!platformPost || !platformPostId) {
+        await safeSend(phone, 'There\'s no active post to change platforms for. Let me know what you\'d like to post about first!')
+        return
+      }
+      const targetPlatform = d.platform || 'both'
+      const currentPlatforms: string[] = platformPost.platforms || ['instagram']
+      const newPlatforms = d.action === 'switch_platform'
+        ? targetPlatform === 'both' ? ['instagram', 'facebook'] : [targetPlatform]
+        : [...new Set([...currentPlatforms, targetPlatform === 'both' ? 'facebook' : targetPlatform])]
+      await updatePost(platformPostId, { platforms: newPlatforms as any })
+      if (newPlatforms.length > 1 && !platformPost.platformContent) {
+        const { generatePlatformContent } = await import('./generate.js')
+        const platformContent = await generatePlatformContent(platformPost.intent!, platformPost.plan!, await getUserPreferences(phone), await getBrandProfile(phone))
+        await setStage(platformPostId, 'WRITTEN', { platformContent })
+      }
+      await setConversation(phone, { kind: 'awaiting_approval', postId: platformPostId })
+      await sendPreview(phone, (await getPost(platformPostId))!)
       return
     }
     if (d.action === 'generate_post') {
@@ -1479,24 +1750,68 @@ if (convKind === 'ad_gathering' || convKind === 'ad_preview') {
     } else if (d.action === 'smalltalk') {
       await sendDecision(phone, d, { key: 'greeting', userText: content, instruction: 'Reply warmly to user\'s smalltalk and ask what they want to create.', fallback: 'Hi! 👋 How are you? What would you like to create today?' })
     } else if (d.action === 'schedule_post') {
-      const ownedIds = (await listPostsForUser(await resolveUserPhone(phone))).map((p) => p.id)
+      const userPhone = await resolveUserPhone(phone)
+      const ownedIds = (await listPostsForUser(userPhone)).map((p) => p.id)
+      // P5-TZ — learn/confirm the user's timezone before interpreting the time.
+      const { tz, needsPrompt } = await ensureTimezone(phone, content)
       if (d.targetPostId && ownedIds.includes(d.targetPostId)) {
         const hasSchedule = await checkPackageFeature(phone, 'scheduled_publishing')
         if (!hasSchedule) {
           await safeSend(phone, '❌ Scheduled publishing is not included in your current plan. Please upgrade your package to use this feature.')
           return
         }
-        const iso = d.scheduleAt ? await resolveScheduleIso(d.scheduleAt) : null
+        const iso = d.scheduleAt ? await resolveScheduleIso(d.scheduleAt, tz) : null
         if (iso) {
           const result = await schedulePost(d.targetPostId, phone, iso)
-          const when = new Date(iso).toLocaleString()
+          const when = formatInZone(iso, tz)
           await safeSend(phone, result === 'rescheduled' ? `✅ Rescheduled! It will now publish on ${when}.` : `✅ Scheduled! It will be published on ${when}.`)
+          if (needsPrompt) await safeSend(phone, '⏰ Note: aapka timezone UTC set hai — ek baar city bataein (e.g. "Karachi") taake aage ka time sahi set ho.')
           return
         }
         await safeSend(phone, '🕐 Sure! What new time should I set? For example "Sunday 6 baje" or "tomorrow at 5pm".')
         return
       }
+      // P5-ADSTATE — after an ad is scheduled the conversation drops to idle with
+      // no targetAdId. If the user asks to reschedule and no post matches, resolve
+      // their most recent ad campaign and reschedule THAT instead.
+      const iso = d.scheduleAt ? await resolveScheduleIso(d.scheduleAt, tz) : null
+      if (iso) {
+        const ownedAds = await listAdCampaignsByPhone(phone)
+        const ad = ownedAds[0]
+        if (ad) {
+          const { updateAdCampaign } = await import('../store.js')
+          await updateAdCampaign(ad.id, { status: 'scheduled', publishAt: iso })
+          await safeSend(phone, `✅ Ad rescheduled! It will launch on ${formatInZone(iso, tz)}.`)
+          if (needsPrompt) await safeSend(phone, '⏰ Note: aapka timezone UTC set hai — ek baar city bataein (e.g. "Karachi") taake aage ka time sahi set ho.')
+          return
+        }
+      }
       await safeSend(phone, "There's no draft to schedule yet. Tell me what you'd like to post about first, and once it's ready I'll schedule it for you.")
+    } else if ((d.action === 'approve' || d.action === 'publish_now') && d.publishNow === true) {
+      // P5-DIRECT — "directly post" / publish now from idle. Resolve the user's
+      // most recent ready post and publish it immediately instead of scheduling.
+      const userPhone = await resolveUserPhone(phone)
+      const recent = (await listPostsForUser(userPhone))
+        .slice()
+        .sort((a, b) => (b.createdAt || '').localeCompare(a.createdAt || ''))[0]
+      if (!recent) {
+        await safeSend(phone, "There's no post to publish yet. Tell me what you'd like to post about and I'll create it for you.")
+        return
+      }
+      if (!recent.content?.caption || !recent.imageUrl) {
+        await safeSend(phone, "Your latest post isn't ready to publish yet — let me finish drafting it first. Tell me the caption or image and I'll prepare it.")
+        return
+      }
+      try {
+        await setStage(recent.id, 'APPROVED')
+        void enqueuePublish(recent.id).catch((err: unknown) => {
+          safeSend(phone, `❌ Could not start publishing: ${(err as Error).message}`)
+        })
+        await safeSend(phone, '✅ Publishing now! I\'ll send it to your connected platforms.')
+      } catch (err) {
+        await safeSend(phone, `❌ Could not start publishing: ${(err as Error).message}`)
+      }
+      return
     } else if (d.action === 'status_check') {
       await sendStatusSummary(phone)
     } else if (d.action === 'cancel_publish') {
@@ -1514,6 +1829,50 @@ if (convKind === 'ad_gathering' || convKind === 'ad_preview') {
         }
       }
       await safeSend(phone, "There's no ad running right now — no need to cancel.")
+    } else if (d.action === 'edit_ad' || d.action === 'continue_ad') {
+      // P5-ADSTATE — "update my ad" from idle with no targetAdId. Resolve the
+      // user's most recent ad campaign and re-show ITS existing preview so they
+      // can edit or reschedule it. We do NOT regenerate the AI copy/image here:
+      // passing incomplete adData into generateAndPreviewAd would silently drop
+      // us back into ad_gathering and re-ask budget/audience/website (the
+      // re-gather bug). The current campaign already holds the real creative.
+      const ownedAds = await listAdCampaignsByPhone(phone)
+      const ad = ownedAds[0]
+      if (ad) {
+        const targeting = ad.targeting || { ageMin: 0, ageMax: 0, genders: [], locations: [], interests: [] }
+        const adData: AdConversationData = {
+          product: ad.name || '',
+          productDescription: '',
+          price: '',
+          audience: `Ages ${targeting.ageMin}-${targeting.ageMax}${targeting.genders?.length ? ', ' + targeting.genders.join('/') : ''}`.trim(),
+          location: (targeting.locations || []).join(', '),
+          budget: Math.round(ad.budgetCents / 100),
+          budgetType: ad.budgetType,
+          currency: ad.currency,
+          startDate: ad.startDate || '',
+          endDate: ad.endDate || '',
+          websiteUrl: ad.adContent?.linkUrl || '',
+          existingPostId: ad.postId || '',
+        }
+        const content = ad.adContent
+        if (content?.headline || content?.primaryText) {
+          await sendImage(phone, ad.imageUrl || '', `**${content.headline}**\n\n${content.primaryText}\n\n${content.description ?? ''}\n\nCTA: ${content.callToAction}`)
+        }
+        const budgetLabel = ad.budgetType === 'total' ? `${ad.budgetCents / 100} ${ad.currency} total` : `${ad.budgetCents / 100} ${ad.currency}/day`
+        await safeSend(phone, `🎯 **Targeting:**\n• Age: ${targeting.ageMin}-${targeting.ageMax}\n• Locations: ${(targeting.locations || []).join(', ') || 'not set'}\n• Interests: ${(targeting.interests || []).join(', ') || 'not set'}`)
+        await safeSend(phone, `💰 **Budget:** ${budgetLabel}\n📋 **Objective:** ${String(ad.objective).replace('OUTCOME_', '')}\n🌐 **Website:** ${content?.linkUrl || 'not set'}`)
+        await safeSend(phone, `📅 **Runs:** ${ad.startDate || 'now'}${ad.endDate ? ` → ${ad.endDate}` : ''}${ad.publishAt ? `\n⏰ **Scheduled launch:** ${formatInZone(ad.publishAt, await resolveUserTimezone(phone))}` : ''}`)
+        await safeSend(phone, 'Yeh ad ka current preview hai. Kya aap isay launch karna chahenge, edit karein, schedule karein, ya cancel karein?')
+        await sendReplyButtons(phone, 'Action:', [
+          { id: 'ad_approve', title: '✅ Approve' },
+          { id: 'ad_edit', title: '✏️ Edit' },
+          { id: 'ad_schedule', title: '📅 Schedule' },
+          { id: 'ad_cancel', title: '❌ Cancel' },
+        ])
+        await setConversation(phone, { kind: 'ad_preview', postId: ad.id, adData } as any)
+        return
+      }
+      await safeSend(phone, "There's no ad to edit yet. Tell me what you'd like to advertise and I'll create one.")
     } else if (d.action === 'new_post') {
       const postId = (await createPost(phone)).id
       await setConversation(phone, { kind: 'gathering', postId, intent: d.intent ?? {} })
@@ -1714,13 +2073,28 @@ if (convKind === 'ad_gathering' || convKind === 'ad_preview') {
     if (d.action === 'approve') {
       if (d.scheduleAt) {
         await handleSchedule(phone, conv.postId, d.scheduleAt)
-      } else {
+      } else if (d.publishNow === true) {
+        // The user explicitly said to publish right now (e.g. "publish now",
+        // "post it"). Publish immediately.
         try {
           await setStage(conv.postId, 'APPROVED')
-          await enqueuePublish(conv.postId)
+          void enqueuePublish(conv.postId).catch((err: unknown) => {
+            safeSend(phone, `❌ Could not start publishing: ${(err as Error).message}`)
+          })
         } catch (err) {
           await safeSend(phone, `❌ Could not start publishing: ${(err as Error).message}`)
         }
+      } else {
+        // A bare "approve" never publishes on its own — ask whether to publish
+        // now or schedule for later so the user controls timing.
+        await sendReplyButtons(
+          phone,
+          'Got it! When would you like this published?',
+          [
+            { id: 'publish', title: '🚀 Publish now' },
+            { id: 'schedule', title: '📅 Schedule for later' },
+          ],
+        )
       }
     } else if (d.action === 'schedule_post') {
       await handleSchedule(phone, conv.postId, d.scheduleAt || content)
@@ -1822,6 +2196,17 @@ if (convKind === 'ad_gathering' || convKind === 'ad_preview') {
       }
     } else {
       await sendDecision(phone, d, { key: 'processing', userText: content, instruction: 'Tell user post publishing in progress.', fallback: '🤖 Abhi main aapki post par kaam kar raha hoon — ek lamba saath rahye!' })
+    }
+    return
+  }
+
+  if (conv.kind === 'image_retry') {
+    const post = (await getPost(conv.postId))!
+    const lower = content.toLowerCase()
+    if (/(retry|try again|\bagain\b|resume|dobara|aazmao|regenerate|image|photo)/.test(lower)) {
+      await retryImageGeneration(phone, conv.postId)
+    } else {
+      await safeSend(phone, '🖼️ This post needs an image before it can be published. Reply "retry" to try generating it again, or "cancel" to stop.')
     }
     return
   }

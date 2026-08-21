@@ -9,7 +9,7 @@ import { Modal } from '../components/ui/Modal';
 import { PlatformStatus } from '../components/user/PlatformStatus';
 import { PageTransition } from '../components/layout/PageTransition';
 import { notify } from '../components/ui/Toast';
-import { apiRequest, endpoints, getUserToken } from '../utils/api';
+import { apiRequest, endpoints } from '../utils/api';
 import { useUserAuth } from '../contexts/UserAuthContext';
 import type { Platform } from '../types';
 import { cn } from '../utils/cn';
@@ -99,8 +99,16 @@ export function Connect() {
 
     // For Facebook, Instagram and Meta Ads, redirect to OAuth
     if (platform.id === 'facebook' || platform.id === 'instagram' || platform.id === 'meta_ads') {
-      const token = getUserToken();
-      window.location.href = `${window.location.origin}/api/social/connect/facebook?token=${encodeURIComponent(token || '')}`;
+      // H6 — never pass the user token in the URL. Mint a short-lived code from
+      // the server and redirect with that instead.
+      try {
+        const res = await apiRequest<{ code: string }>(endpoints.socialConnectIntent, { method: 'POST' });
+        const provider = platform.id === 'meta_ads' ? 'facebook' : platform.id;
+        window.location.href = `${window.location.origin}/api/social/connect/${provider}?code=${encodeURIComponent(res.code)}`;
+      } catch (err) {
+        notify.error('Connection failed', (err as Error).message);
+        setBusy(null);
+      }
       return;
     }
 

@@ -43,14 +43,16 @@ function signWebhook(payload: string, timestamp: string): string {
   return crypto.createHmac('sha256', GATEWAY_WEBHOOK_SECRET).update(`${timestamp}.${payload}`).digest('hex').toUpperCase()
 }
 
-function completedEvent(merchantTransactionId: string): string {
+function completedEvent(merchantTransactionId: string, amount = 4437): string {
+  // 4437 PKR = 15 USD * 290 rate, +2% MDR (87) — the exact amount /api/checkout sends
+  // for the Starter package. The webhook handler verifies this against the payment.
   return JSON.stringify({
     eventId: 'evt_test_1',
     eventType: 'transaction.completed',
     merchantTransactionId,
     gatewayTxnRef: 'gtxn_abc123',
     status: 'SUCCESS',
-    amount: 43.5,
+    amount,
     currency: 'PKR',
   })
 }
@@ -183,6 +185,25 @@ describe('payment gateway (RapidGateway) flow', () => {
 
     const updated = await listPayments(PHONE)
     expect(updated[0].status).toBe('completed')
+  })
+
+  it('rejects a webhook whose amount does not match the recorded payment', async () => {
+    await app.inject({ method: 'POST', url: '/api/checkout', headers: { authorization: 'Bearer test' }, payload: { packageId: 'starter', method: 'gateway' } })
+    const paymentId = (await listPayments(PHONE))[0].id
+    const payload = completedEvent(paymentId, 1)
+    const ts = String(Math.floor(Date.now() / 1000))
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/webhooks/gateway',
+      headers: { 'x-rapidgateway-signature': signWebhook(payload, ts), 'x-rapidgateway-timestamp': ts, 'content-type': 'application/json' },
+      payload,
+    })
+    expect(res.statusCode).toBe(400)
+
+    const user = await getUser(PHONE)
+    expect(user!.packageStatus).not.toBe('active')
+    expect((await listPayments(PHONE))[0].status).not.toBe('completed')
   })
 
   it('marks the payment failed and does not activate on transaction.failed', async () => {

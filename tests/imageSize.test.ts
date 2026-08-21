@@ -37,11 +37,17 @@ describe('parseImageSize', () => {
 })
 
 describe('provider size mapping', () => {
-  it('maps each ratio for openai', () => {
+  it('maps each ratio for openai to a gpt-image-1-mini supported size', () => {
+    // H18 — gpt-image-1-mini only supports 1024x1024, 1536x1024, 1024x1536.
+    // 9:16 has no exact match and previously produced the invalid 1024x1792.
+    const valid = ['1024x1024', '1536x1024', '1024x1536']
     expect(openaiSize('1:1')).toBe('1024x1024')
     expect(openaiSize('4:5')).toBe('1024x1536')
     expect(openaiSize('16:9')).toBe('1536x1024')
-    expect(openaiSize('9:16')).toBe('1024x1792')
+    expect(openaiSize('9:16')).toBe('1024x1536')
+    for (const size of ['1:1', '4:5', '3:4', '16:9', '9:16'] as ImageSize[]) {
+      expect(valid).toContain(openaiSize(size))
+    }
   })
 
   it('maps each ratio for stability', () => {

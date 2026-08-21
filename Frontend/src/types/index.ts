@@ -39,7 +39,13 @@ export interface TopUpBundle {
   sortOrder: number;
 }
 
-export type PostStatus = 'published' | 'scheduled' | 'draft' | 'failed';
+export type PostStatus = 'published' | 'scheduled' | 'draft' | 'failed' | 'partial';
+
+export interface PlatformPublishState {
+  status: 'published' | 'failed' | 'skipped';
+  permalink?: string;
+  error?: string;
+}
 
 export interface Post {
   id: string;
@@ -48,6 +54,7 @@ export interface Post {
   platform: PlatformId;
   status: PostStatus;
   tokens: number;
+  platformStatuses?: Partial<Record<'instagram' | 'facebook', PlatformPublishState>>;
 }
 
 export type UserStatus = 'active' | 'inactive';

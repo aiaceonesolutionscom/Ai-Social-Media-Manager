@@ -2,11 +2,12 @@ import { FastifyInstance } from 'fastify'
 import { config } from '../config.js'
 import { createEmailUser, loginEmailUser, findOrCreateOAuthUser, verifySession, destroySession, createSession, hashPassword, comparePassword } from '../lib/userAuth.js'
 import { getUser, getUserByEmail, createUser, updateUser, getPackage, updateUserSessionsEmail } from '../store.js'
-import { endPackage } from '../lib/packageLifecycle.js'
+import { endPackage, pausePackage, resumePackage } from '../lib/packageLifecycle.js'
 import { storageManager } from '../lib/StorageManager.js'
 import { rateLimit } from '../lib/ratelimit.js'
 import { verifyToken, createClerkClient } from '@clerk/backend'
 import { logger } from '../lib/logger.js'
+import { createShortLivedCode, consumeShortLivedCode } from '../lib/shortCode.js'
 
 export async function registerAuthRoutes(server: FastifyInstance): Promise<void> {
   // ---- Email/Password Auth ----
@@ -224,6 +225,32 @@ export async function registerAuthRoutes(server: FastifyInstance): Promise<void>
     })
   })
 
+  server.post('/api/user/package/pause', async (req: any, reply: any) => {
+    const phone = await requireSession(req, reply)
+    if (!phone) return
+    const user = await getUser(phone)
+    if (!user) return reply.status(404).send({ error: 'User not found' })
+    try {
+      const updated = await pausePackage(phone, { reason: 'paused from dashboard' })
+      return reply.send({ success: true, packageStatus: updated.packageStatus })
+    } catch (err) {
+      return reply.status(400).send({ error: (err as Error).message })
+    }
+  })
+
+  server.post('/api/user/package/resume', async (req: any, reply: any) => {
+    const phone = await requireSession(req, reply)
+    if (!phone) return
+    const user = await getUser(phone)
+    if (!user) return reply.status(404).send({ error: 'User not found' })
+    try {
+      const updated = await resumePackage(phone)
+      return reply.send({ success: true, packageStatus: updated.packageStatus })
+    } catch (err) {
+      return reply.status(400).send({ error: (err as Error).message })
+    }
+  })
+
   server.put('/api/user/password', async (req: any, reply: any) => {
     const phone = await requireSession(req, reply)
     if (!phone) return
@@ -285,7 +312,11 @@ export async function registerAuthRoutes(server: FastifyInstance): Promise<void>
         errors: err.errors,
         cause: err.cause?.message,
       }, 'clerk token verification failed')
-      return reply.status(401).send({ error: 'Invalid or expired Clerk session' })
+      return reply.status(401).send({
+        error:
+          'Invalid or expired Clerk session. Verify that your frontend VITE_CLERK_PUBLISHABLE_KEY and backend ' +
+          'CLERK_SECRET_KEY belong to the SAME Clerk application (and same dev/prod instance). A key mismatch causes every session to be rejected.',
+      })
     }
 
     try {
@@ -330,6 +361,30 @@ export async function registerAuthRoutes(server: FastifyInstance): Promise<void>
     })
   })
 
+  // H6 — OAuth callbacks redirect with a short-lived, single-use code (never the
+  // session token). The frontend exchanges it here for the real token.
+  server.post('/api/auth/exchange', async (req: any, reply: any) => {
+    const { allowed } = rateLimit(`exchange:${req.ip}`, { windowMs: 60 * 60 * 1000, max: 120 })
+    if (!allowed) {
+      return reply.status(429).send({ error: 'Too many requests. Please try again later.' })
+    }
+    const { code } = req.body as { code?: string }
+    if (!code || typeof code !== 'string') {
+      return reply.status(400).send({ error: 'code is required' })
+    }
+    const raw = consumeShortLivedCode(code)
+    if (!raw) {
+      return reply.status(401).send({ error: 'Invalid or expired code' })
+    }
+    try {
+      const parsed = JSON.parse(raw) as { token: string; phone: string; isNew?: boolean }
+      if (!parsed.token || !parsed.phone) throw new Error('malformed payload')
+      return reply.send({ token: parsed.token, phone: parsed.phone, isNew: !!parsed.isNew })
+    } catch {
+      return reply.status(401).send({ error: 'Invalid or expired code' })
+    }
+  })
+
   // Google OAuth
   server.get('/api/auth/google', async (req: any, reply: any) => {
     if (!config.oauth.google.clientId) {
@@ -364,7 +419,8 @@ export async function registerAuthRoutes(server: FastifyInstance): Promise<void>
       const userData = await userRes.json() as any
 
       const result = await findOrCreateOAuthUser('google', userData.id, userData.email, userData.name, userData.picture)
-      return reply.redirect(`${config.frontendUrl}/auth/callback?token=${result.token}&phone=${result.phone}&new=${result.isNew}`)
+      const authCode = createShortLivedCode(JSON.stringify({ token: result.token, phone: result.phone, isNew: result.isNew }))
+      return reply.redirect(`${config.frontendUrl}/auth/callback?code=${authCode}`)
     } catch (err: any) {
       return reply.redirect(`${config.frontendUrl}/login?error=oauth_failed`)
     }
@@ -392,7 +448,8 @@ export async function registerAuthRoutes(server: FastifyInstance): Promise<void>
       const userData = await userRes.json() as any
 
       const result = await findOrCreateOAuthUser('facebook', userData.id, userData.email || `${userData.id}@facebook.com`, userData.name)
-      return reply.redirect(`${config.frontendUrl}/auth/callback?token=${result.token}&phone=${result.phone}&new=${result.isNew}`)
+      const authCode = createShortLivedCode(JSON.stringify({ token: result.token, phone: result.phone, isNew: result.isNew }))
+      return reply.redirect(`${config.frontendUrl}/auth/callback?code=${authCode}`)
     } catch (err: any) {
       return reply.redirect(`${config.frontendUrl}/login?error=oauth_failed`)
     }
@@ -431,7 +488,8 @@ export async function registerAuthRoutes(server: FastifyInstance): Promise<void>
 
       const email = userData.email || `${userData.login}@github.com`
       const result = await findOrCreateOAuthUser('github', String(userData.id), email, userData.name || userData.login, userData.avatar_url)
-      return reply.redirect(`${config.frontendUrl}/auth/callback?token=${result.token}&phone=${result.phone}&new=${result.isNew}`)
+      const authCode = createShortLivedCode(JSON.stringify({ token: result.token, phone: result.phone, isNew: result.isNew }))
+      return reply.redirect(`${config.frontendUrl}/auth/callback?code=${authCode}`)
     } catch (err: any) {
       return reply.redirect(`${config.frontendUrl}/login?error=oauth_failed`)
     }

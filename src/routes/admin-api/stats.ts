@@ -16,7 +16,7 @@ export async function registerAdminStatsRoutes(server: FastifyInstance): Promise
     const thisMonth = completedPayments.filter(p => {
       const d = new Date(p.createdAt)
       const now = new Date()
-      return d.getMonth() === now.getMonth() && d.getFullYear() === now.getFullYear()
+      return d.getUTCMonth() === now.getUTCMonth() && d.getUTCFullYear() === now.getUTCFullYear()
     })
     const monthRevenue = thisMonth.reduce((sum, p) => sum + p.amountCents, 0)
 

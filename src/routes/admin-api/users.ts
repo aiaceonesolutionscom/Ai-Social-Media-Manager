@@ -1,7 +1,7 @@
 import { FastifyInstance } from 'fastify'
-import { listUsers, getUser, updateUser, activateUser, deactivateUser, deleteUser, getTransactions, createUser, listPackages, getPackage, createPayment, createTokenTransaction, listPayments, listAuditLogs, getUserPreferences, saveUserPreferences } from '../../store.js'
+import { listUsers, getUser, updateUser, activateUser, deactivateUser, deleteUser, getTransactions, createUser, listPackages, getPackage, createPayment, createTokenTransaction, listPayments, listAuditLogs, getUserPreferences, saveUserPreferences, sanitizeUser, sanitizeUsers } from '../../store.js'
 import { grantTokens } from '../../lib/tokens.js'
-import { hashPassword } from '../../lib/userAuth.js'
+import { hashPassword, createSession } from '../../lib/userAuth.js'
 import { clearFeatureCache } from '../../lib/packagePermissions.js'
 import { activatePackage, endPackage, isPackageExpired } from '../../lib/packageLifecycle.js'
 import { guard } from './middleware.js'
@@ -9,9 +9,9 @@ import { auditLogger } from '../../lib/AuditLogger.js'
 
 export async function registerAdminUserRoutes(server: FastifyInstance): Promise<void> {
 
-  server.get('/api/admin/users', guard('users.view'), async (req: any, reply: any) => {
+  server.get('/api/admin/users', guard('users.view'), async (_req: any, reply: any) => {
     const users = await listUsers()
-    return reply.send({ users })
+    return reply.send({ users: sanitizeUsers(users) })
   })
 
   server.get('/api/admin/users/:phone', guard('users.view'), async (req: any, reply: any) => {
@@ -20,7 +20,7 @@ export async function registerAdminUserRoutes(server: FastifyInstance): Promise<
     if (!user) {
       return reply.status(404).send({ error: 'User not found' })
     }
-    return reply.send({ user })
+    return reply.send({ user: sanitizeUser(user) })
   })
 
   server.get('/api/admin/users/:phone/detail', guard('users.view'), async (req: any, reply: any) => {
@@ -38,7 +38,7 @@ export async function registerAdminUserRoutes(server: FastifyInstance): Promise<
     ])
     return reply.send({
       user: {
-        ...user,
+        ...sanitizeUser(user),
         packageName: pkg?.name || '',
         packageInfo: pkg
           ? {
@@ -54,6 +54,27 @@ export async function registerAdminUserRoutes(server: FastifyInstance): Promise<
       payments,
       auditLogs,
     })
+  })
+
+  // Admin: impersonate a user — mint a user session token so an admin can open
+  // that user's dashboard directly (e.g. to test as a real Clerk-created account).
+  server.post('/api/admin/users/:phone/impersonate', guard('users.view'), async (req: any, reply: any) => {
+    const { phone } = req.params as { phone: string }
+    const user = await getUser(phone)
+    if (!user) {
+      return reply.status(404).send({ error: 'User not found' })
+    }
+    const token = await createSession(user.email)
+    try {
+      auditLogger.log({
+        actor: req.adminEmail,
+        actorType: 'admin',
+        action: 'admin.impersonate',
+        target: phone,
+        details: { email: user.email },
+      })
+    } catch { /* non-fatal */ }
+    return reply.send({ token, phone: user.phone, email: user.email })
   })
 
   server.post('/api/admin/users', guard('users.create'), async (req: any, reply: any) => {
@@ -87,7 +108,7 @@ export async function registerAdminUserRoutes(server: FastifyInstance): Promise<
       }
       auditLogger.log({ actor: req.adminEmail, actorType: 'admin', action: 'user.create', target: email, details: { name, packageId } })
       const created = await getUser(phone)
-      return reply.status(201).send({ user: created })
+      return reply.status(201).send({ user: sanitizeUser(created!) })
     } catch (err) {
       return reply.status(400).send({ error: (err as Error).message })
     }
@@ -143,7 +164,7 @@ export async function registerAdminUserRoutes(server: FastifyInstance): Promise<
       }
 
       const updated = await getUser(phone)
-      return reply.send({ user: updated })
+      return reply.send({ user: sanitizeUser(updated!) })
     } catch (err) {
       return reply.status(400).send({ error: (err as Error).message })
     }
@@ -154,7 +175,7 @@ export async function registerAdminUserRoutes(server: FastifyInstance): Promise<
     try {
       const user = await activateUser(phone)
       auditLogger.log({ actor: req.adminEmail, actorType: 'admin', action: 'user.activate', target: phone })
-      return reply.send({ user })
+      return reply.send({ user: sanitizeUser(user) })
     } catch (err) {
       return reply.status(400).send({ error: (err as Error).message })
     }
@@ -165,7 +186,7 @@ export async function registerAdminUserRoutes(server: FastifyInstance): Promise<
     try {
       const user = await deactivateUser(phone)
       auditLogger.log({ actor: req.adminEmail, actorType: 'admin', action: 'user.deactivate', target: phone })
-      return reply.send({ user })
+      return reply.send({ user: sanitizeUser(user) })
     } catch (err) {
       return reply.status(400).send({ error: (err as Error).message })
     }
@@ -271,7 +292,7 @@ export async function registerAdminUserRoutes(server: FastifyInstance): Promise<
     }
 
     const updated = await endPackage(phone, { actor: req.adminEmail || 'admin', reason: 'ended by admin' })
-    return reply.send({ success: true, user: updated })
+    return reply.send({ success: true, user: sanitizeUser(updated) })
   })
 
   // Get user branding settings (admin override)

@@ -41,8 +41,10 @@ export async function getUserFeatures(phone: string): Promise<Record<string, boo
     return {}
   }
 
-  // Expired or manually-ended packages are locked — no features until renewed.
-  if (isPackageExpired(user)) {
+  // Expired, manually-ended, or PAUSED packages are locked — no features until
+  // renewed or resumed. Paused is not expired (tokens survive) but the user may
+  // not take new actions or run scheduled jobs while paused.
+  if (isPackageExpired(user) || user.packageStatus === 'paused') {
     setCachedFeatures(phone, {})
     return {}
   }

@@ -124,11 +124,11 @@ export async function registerAdminReportRoutes(server: FastifyInstance): Promis
     const newToday = users.filter((u) => u.createdAt?.startsWith(today)).length
     const newThisMonth = users.filter((u) => {
       const d = new Date(u.createdAt)
-      return d.getMonth() === now.getMonth() && d.getFullYear() === now.getFullYear()
+      return d.getUTCMonth() === now.getUTCMonth() && d.getUTCFullYear() === now.getUTCFullYear()
     }).length
     const monthRevenue = completedPayments.filter((p) => {
       const d = new Date(p.createdAt)
-      return d.getMonth() === now.getMonth() && d.getFullYear() === now.getFullYear()
+      return d.getUTCMonth() === now.getUTCMonth() && d.getUTCFullYear() === now.getUTCFullYear()
     }).reduce((s, p) => s + p.amountCents, 0)
 
     const signupsByDay: { date: string; count: number }[] = []

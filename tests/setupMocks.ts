@@ -32,15 +32,16 @@ vi.mock('../src/lib/instagram.js', () => ({
   },
 }))
 
-vi.mock('../src/pipeline/generate.js', () => ({
-  generateFullDraft: vi.fn(),
-  brandCheck: vi.fn(),
-  generateImagePrompt: vi.fn(),
-  planEdit: vi.fn(),
-  extractIntent: vi.fn(),
-  planContent: vi.fn(),
-  writeContent: vi.fn(),
-}))
+vi.mock('../src/pipeline/generate.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../src/pipeline/generate.js')>()
+  return {
+    ...actual,
+    generateFullDraft: vi.fn(),
+    brandCheck: vi.fn(),
+    generateImagePrompt: vi.fn(),
+    planEdit: vi.fn(),
+  }
+})
 
 vi.mock('../src/storage.js', () => ({
   saveAudioBuffer: vi.fn().mockReturnValue('audio/test.ogg'),

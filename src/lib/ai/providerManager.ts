@@ -3,7 +3,7 @@ import { config } from '../../config.js'
 import { logger } from '../logger.js'
 import { getActiveAIProvider, logAIUsage, getActivePricingVersion } from '../../store.js'
 import type { AIProviderCategory, AIProvider } from '../../types.js'
-import type { STTProviderAdapter, LLMProviderAdapter, ImageProviderAdapter, ChatMessage, ChatOptions, TranscribeOptions, ImageOptions } from './providers/base.js'
+import type { STTProviderAdapter, LLMProviderAdapter, ImageProviderAdapter, ChatMessage, ChatOptions, ChatResult, TranscribeOptions, ImageOptions } from './providers/base.js'
 import { groqSTT } from './providers/groq.js'
 import { openaiSTT } from './providers/openai-stt.js'
 import { deepseekLLM } from './providers/deepseek.js'
@@ -217,7 +217,7 @@ class ProviderManager {
 
   // ---- LLM ----
 
-  async chat(messages: ChatMessage[], opts: ChatOptions = {}): Promise<string> {
+  async chatRaw(messages: ChatMessage[], opts: ChatOptions = {}): Promise<ChatResult> {
     if (!this.llmAdapter || !this.llmProvider) {
       throw new Error(
         'No active Language Model provider configured. ' +
@@ -283,7 +283,7 @@ class ProviderManager {
         cachedInputTokens: 0,
       }).catch((err) => logger.warn({ error: err.message }, 'Failed to log LLM usage'))
 
-      return result.content
+      return result
     } catch (err) {
       const error = err as Error
       logger.error({ 
@@ -298,9 +298,44 @@ class ProviderManager {
     }
   }
 
-  async chatJson<T>(messages: ChatMessage[], opts: { temperature?: number } = {}): Promise<T> {
-    const raw = await this.chat(messages, { json: true, temperature: opts.temperature })
-    const text = raw.trim()
+  async chat(messages: ChatMessage[], opts: ChatOptions = {}): Promise<string> {
+    return (await this.chatRaw(messages, opts)).content
+  }
+
+  async chatJson<T>(messages: ChatMessage[], opts: { temperature?: number; phone?: string; maxTokens?: number } = {}): Promise<T> {
+    const run = async (maxTokens?: number) =>
+      this.chatRaw(messages, { json: true, temperature: opts.temperature, phone: opts.phone, ...(maxTokens ? { maxTokens } : {}) })
+
+    // P5-TRUNC — a response is considered truncated when EITHER:
+    // (a) the provider reports finish_reason === 'length', OR
+    // (b) it is JSON mode but the text has no closing brace/bracket (the model
+    //     returned finish_reason 'stop' yet still cut the content mid-field —
+    //     e.g. a caption ending "...scrambling for coffee, an" with no '}').
+    // In both cases we retry ONCE with a larger token budget before giving up.
+    const isTruncated = (r: ChatResult): boolean => {
+      if (r.truncated) return true
+      // chatJson always requests JSON mode; a complete JSON object/array must
+      // end with } or ]. If it doesn't, the model cut the content mid-field
+      // (e.g. a caption ending "...scrambling for coffee, an" with no '}').
+      const t = r.content.trim()
+      const body = t.startsWith('```')
+        ? t.replace(/^```(?:json)?/i, '').replace(/```$/, '').trim()
+        : t
+      if (body.length > 0 && !body.endsWith('}') && !body.endsWith(']')) return true
+      return false
+    }
+
+    let result = await run(opts.maxTokens)
+    if (isTruncated(result)) {
+      const nextTokens = Math.min((opts.maxTokens ?? 512) * 2, 4096)
+      logger.warn({ model: this.llmProvider?.model, nextTokens }, 'LLM response truncated — retrying with larger max_tokens')
+      result = await run(nextTokens)
+      if (isTruncated(result)) {
+        throw new Error('Language Model response was truncated even after retry. Reduce the requested length or raise the model token limit.')
+      }
+    }
+
+    const text = result.content.trim()
     const json = text.startsWith('```')
       ? text.replace(/^```(?:json)?/i, '').replace(/```$/, '').trim()
       : text

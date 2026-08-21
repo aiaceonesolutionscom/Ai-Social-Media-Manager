@@ -21,12 +21,6 @@ export const STATIC_REPLIES: Record<string, Record<LangCode, string>> = {
     ar: 'السلام عليكم! 👋 ماذا تريد أن تنشئ اليوم؟',
     en: 'Hi! 👋 What would you like to create today?',
   },
-  greetingRoman: {
-    ur: 'Salam! 👋 Aaj aap kya banana chahien ge? (Instagram/Facebook post, ad, ya kuch aur)',
-    hi: 'Namaste! 👋 Aaj aap kya banana chahoge? (Instagram/Facebook post, ad, ya kuch aur)',
-    ar: 'Salam! 👋 Aaj aap kya banana chahien ge?',
-    en: 'Hi! 👋 What would you like to create today?',
-  },
   thanks: {
     ur: 'Khush aamdeed! 😊 Bataiye aap kis bare mein post banana chahte hain aur main bana deta hoon.',
     hi: 'Aapka swagat hai! 😊 Bataiye aap kis cheez ke baare mein post banana chahte hain aur main bana deta hoon.',

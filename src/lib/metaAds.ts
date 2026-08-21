@@ -29,6 +29,7 @@ export interface AdSetConfig {
   targeting: Record<string, unknown>
   optimizationGoal: string
   billingEvent: string
+  promotedObject?: Record<string, unknown>
 }
 
 export interface AdCreativeConfig {
@@ -168,6 +169,10 @@ export async function createAdSet(
 
   if (config.startDate) body.start_time = config.startDate
   if (config.endDate) body.end_time = config.endDate
+  // Conversion objectives (LEADS/SALES) require a promoted_object. Without it
+  // Meta rejects the ad set with an error after creation — so it must be set
+  // here when the caller supplied one (page_id for leads, pixel_id for sales).
+  if (config.promotedObject) body.promoted_object = config.promotedObject
 
   const result = await adsPost(`/${adAccountId}/adsets`, body, accessToken)
   const adSetId = result.id as string
@@ -290,6 +295,7 @@ export interface LaunchMetaAdParams {
   endDate?: string
   targeting: Record<string, unknown>
   idempotencyKey?: string
+  pixelId?: string
 }
 
 export interface LaunchMetaAdResult {
@@ -310,6 +316,18 @@ export async function launchMetaAd(params: LaunchMetaAdParams): Promise<LaunchMe
 
   try {
     const { optimizationGoal, billingEvent } = objectiveOptimization(params.objective)
+
+    // Conversion objectives require a promoted_object. Never silently omit it:
+    // surface the missing requirement BEFORE creating anything on Meta.
+    let promotedObject: Record<string, unknown> | undefined
+    if (params.objective === 'OUTCOME_LEADS') {
+      promotedObject = { page_id: params.pageId }
+    } else if (params.objective === 'OUTCOME_SALES') {
+      if (!params.pixelId) {
+        throw new Error('The OUTCOME_SALES objective requires a Meta Pixel. Set META_ADS_PIXEL_ID (or pass a pixelId) before launching a sales campaign.')
+      }
+      promotedObject = { pixel_id: params.pixelId }
+    }
 
     campaignId = await createCampaign(adAccountId, params.accessToken, {
       name: `${params.name} - Campaign`,
@@ -333,6 +351,7 @@ export async function launchMetaAd(params: LaunchMetaAdParams): Promise<LaunchMe
       targeting: params.targeting,
       optimizationGoal,
       billingEvent,
+      promotedObject,
     })
 
     creativeId = await createAdCreative(adAccountId, params.accessToken, {

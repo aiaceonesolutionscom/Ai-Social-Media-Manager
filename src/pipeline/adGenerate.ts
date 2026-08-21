@@ -74,7 +74,7 @@ TARGETING RULES:
 1. ageMin: minimum age (18-65). Base it on the described audience.
 2. ageMax: maximum age (18-65). Must be greater than ageMin. If the audience is "everyone" or adults, a reasonable default range is 18-65.
 3. genders: array containing "all", "male", or "female". Default to ["all"] unless the audience clearly specifies otherwise.
-4. locations: 1-3 relevant countries or cities. If a specific location is provided, prioritize it. If no location is given, use a reasonable geographic default for the audience/business (e.g. "Pakistan", "United States", "United Arab Emirates" based on the provided language/context). Do not invent an unlikely specific city.
+4. locations: only the exact location the user provided. If no location was provided, return an EMPTY array — never guess or invent a location.
 5. interests: 3-5 relevant interest categories clearly related to the topic and audience. Do not add unrelated interests.
 
 Return ONLY valid JSON. No markdown. No explanation. No additional keys.

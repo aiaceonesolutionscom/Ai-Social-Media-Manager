@@ -16,6 +16,16 @@ export const posts = pgTable('posts', {
   index('idx_posts_stage').on(table.stage),
 ])
 
+export const chatThreads = pgTable('chat_threads', {
+  id: text('id').primaryKey(),
+  phone: text('phone').notNull(),
+  title: text('title'),
+  createdAt: text('created_at').notNull(),
+  updatedAt: text('updated_at').notNull(),
+}, (table) => [
+  index('idx_chat_threads_phone').on(table.phone, table.updatedAt),
+])
+
 export const messages = pgTable('messages', {
   id: text('id').primaryKey(),
   phone: text('phone').notNull(),
@@ -166,6 +176,7 @@ export const userSessions = pgTable('user_sessions', {
 export const adminConfig = pgTable('admin_config', {
   key: text('key').primaryKey(),
   value: text('value').notNull(),
+  isSensitive: boolean('is_sensitive').notNull().default(false),
   updatedAt: text('updated_at').notNull(),
 })
 
@@ -195,6 +206,7 @@ export const payments = pgTable('payments', {
   mdrPercent: integer('mdr_percent'),
   taxAmount: integer('tax_amount'),
   mdrAmount: integer('mdr_amount'),
+  currency: text('currency').notNull().default('USD'),
   type: text('type').notNull(),
   stripeSessionId: text('stripe_session_id'),
   status: text('status').notNull().default('pending'),
@@ -212,6 +224,7 @@ export const adCampaigns = pgTable('ad_campaigns', {
   name: text('name').notNull(),
   objective: text('objective').notNull(),
   status: text('status').notNull().default('pending'),
+  launchStartedAt: text('launch_started_at'),
   adContent: jsonb('ad_content').notNull(),
   targeting: jsonb('targeting').notNull(),
   budgetCents: integer('budget_cents').notNull(),
@@ -408,6 +421,7 @@ export const scheduledPosts = pgTable('scheduled_posts', {
   status: text('status').notNull().default('pending'),
   createdAt: text('created_at').notNull(),
   processedAt: text('processed_at'),
+  contentSnapshot: jsonb('content_snapshot'),
 }, (table) => [
   index('idx_scheduled_publish_at').on(table.publishAt),
   index('idx_scheduled_status').on(table.status),

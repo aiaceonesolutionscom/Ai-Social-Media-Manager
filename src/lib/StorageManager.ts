@@ -98,19 +98,42 @@ class StorageManager {
     const adapter = this.adapter as LocalStorageAdapter
     const cutoff = Date.now() - maxAgeDays * 24 * 60 * 60 * 1000
     let deleted = 0
+    // Referenced-identifier sets are loaded lazily, only if an old file is found.
+    let referencedPosts: Set<string> | null = null
+    let referencedAvatarBases: Set<string> | null = null
     try {
       const dir = path.join(config.storageDir, 'images')
       const files = await fs.readdir(dir)
       for (const file of files) {
         const filePath = path.join(dir, file)
         const stat = await fs.stat(filePath)
-        if (stat.mtimeMs < cutoff) {
-          await fs.unlink(filePath)
-          deleted++
+        if (stat.mtimeMs >= cutoff) continue
+
+        // P5-12 — never delete media that is still referenced: post images
+        // (<postId>.<ext>, incl. scheduled posts / ad campaigns, which reference
+        // posts) and user avatar files (avatar_<sanitizedPhone>.<ext>).
+        const base = file.replace(/\.[a-z0-9]+$/i, '')
+        if (base.startsWith('avatar_')) {
+          if (!referencedAvatarBases) {
+            const { listUsers } = await import('../store.js')
+            referencedAvatarBases = new Set(
+              (await listUsers()).map((u) => `avatar_${u.phone.replace(/[^a-zA-Z0-9_-]/g, '_')}`),
+            )
+          }
+          if (referencedAvatarBases.has(base)) continue
+        } else {
+          if (!referencedPosts) {
+            const { listPosts } = await import('../store.js')
+            referencedPosts = new Set((await listPosts()).map((p) => p.id))
+          }
+          if (referencedPosts.has(base)) continue
         }
+
+        await fs.unlink(filePath)
+        deleted++
       }
       if (deleted > 0) {
-        logger.info({ deleted, maxAgeDays }, 'storage cleanup completed')
+        logger.info({ deleted, maxAgeDays }, 'storage cleanup completed (referenced media preserved)')
       }
     } catch (err) {
       logger.error({ err }, 'storage cleanup failed')

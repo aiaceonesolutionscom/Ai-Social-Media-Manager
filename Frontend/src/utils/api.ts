@@ -26,19 +26,24 @@ export const endpoints = {
   // Chat
   chatMessages: '/api/chat/messages',
   chat: '/api/chat',
+  chatThreads: '/api/chat/threads',
+  chatThreadsCreate: '/api/chat/threads',
   // User auth
   signup: '/api/auth/signup',
   login: '/api/auth/login',
   clerkBridge: '/api/auth/clerk',
+  authExchange: '/api/auth/exchange',
   userMe: '/api/auth/me',
   logout: '/api/auth/logout',
   userProfile: '/api/user/profile',
   userAvatar: '/api/user/avatar',
   userPassword: '/api/user/password',
+  preferences: '/api/preferences',
   userEndPackage: '/api/user/package/end',
   // Social accounts
   socialAccounts: '/api/social/accounts',
   socialConnect: (platform: string) => `/api/social/connect/${platform}`,
+  socialConnectIntent: '/api/social/connect/intent',
   socialDisconnect: (id: string) => `/api/social/disconnect/${id}`,
   // Admin
   adminLogin: '/api/admin/login',
@@ -64,6 +69,7 @@ export const endpoints = {
   adminEndPackage: (phone: string) => `/api/admin/users/${phone}/end-package`,
   adminUserDetail: (phone: string) => `/api/admin/users/${phone}/detail`,
   adminUserBranding: (phone: string) => `/api/admin/users/${phone}/branding`,
+  adminImpersonate: (phone: string) => `/api/admin/users/${phone}/impersonate`,
   adminAdmins: '/api/admin/admins',
   adminAdmin: (id: string) => `/api/admin/admins/${id}`,
   adminAuditLogs: '/api/admin/audit-logs',

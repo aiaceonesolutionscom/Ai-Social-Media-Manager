@@ -29,17 +29,64 @@ interface ScheduledAd {
   adContent?: { primaryText?: string; headline?: string };
 }
 
-function formatDateTime(iso: string): string {
+// Common IANA zones; the user's saved zone is added if it isn't listed.
+const COMMON_TIMEZONES = [
+  'UTC',
+  'Asia/Karachi',
+  'Asia/Kolkata',
+  'Asia/Dhaka',
+  'Asia/Dubai',
+  'Asia/Shanghai',
+  'Asia/Singapore',
+  'Asia/Tokyo',
+  'Europe/London',
+  'Europe/Berlin',
+  'Europe/Paris',
+  'America/New_York',
+  'America/Chicago',
+  'America/Denver',
+  'America/Los_Angeles',
+  'Australia/Sydney',
+];
+
+function formatDateTime(iso: string, tz?: string): string {
   try {
-    return format(parseISO(iso), 'MMM d, yyyy h:mm a');
+    const d = parseISO(iso);
+    if (tz) {
+      return new Intl.DateTimeFormat('en-US', {
+        timeZone: tz,
+        month: 'short',
+        day: 'numeric',
+        year: 'numeric',
+        hour: '2-digit',
+        minute: '2-digit',
+        hour12: true,
+      }).format(d);
+    }
+    return format(d, 'MMM d, yyyy h:mm a');
   } catch {
     return iso;
   }
 }
 
-function toLocalInput(iso: string): string {
+function toLocalInput(iso: string, tz?: string): string {
   try {
-    return format(parseISO(iso), "yyyy-MM-dd'T'HH:mm");
+    // Render the stored UTC time as a naive datetime-local string in the user's
+    // chosen zone so the reschedule picker opens on the correct wall-clock time.
+    const d = parseISO(iso);
+    const parts = new Intl.DateTimeFormat('en-CA', {
+      timeZone: tz || 'UTC',
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+      hour12: false,
+    }).formatToParts(d).reduce<Record<string, string>>((acc, p) => {
+      acc[p.type] = p.value;
+      return acc;
+    }, {});
+    return `${parts.year}-${parts.month}-${parts.day}T${parts.hour}:${parts.minute}`;
   } catch {
     return '';
   }
@@ -56,6 +103,7 @@ export function Scheduled() {
 
   const [caption, setCaption] = React.useState('');
   const [publishAt, setPublishAt] = React.useState('');
+  const [publishNow, setPublishNow] = React.useState(false);
   const [imageBase64, setImageBase64] = React.useState('');
   const [imageName, setImageName] = React.useState('');
   const [submitting, setSubmitting] = React.useState(false);
@@ -63,6 +111,11 @@ export function Scheduled() {
   const [reschedulingId, setReschedulingId] = React.useState<string | null>(null);
   const [rescheduleTime, setRescheduleTime] = React.useState('');
   const [rescheduling, setRescheduling] = React.useState(false);
+
+  const [timezone, setTimezone] = React.useState<string>(
+    Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC',
+  );
+  const [savingTz, setSavingTz] = React.useState(false);
 
   const hasSchedule = !featuresLoading && hasFeature('scheduled_publishing');
   const hasAds = !featuresLoading && hasFeature('ad_campaigns');
@@ -105,7 +158,27 @@ export function Scheduled() {
     }
     fetchPosts();
     fetchAds();
+    apiRequest<{ timezone?: string }>(endpoints.preferences)
+      .then((data) => {
+        if (data.timezone) setTimezone(data.timezone);
+      })
+      .catch(() => {});
   }, [isAuthenticated, authLoading, navigate, fetchPosts, fetchAds]);
+
+  const onTimezoneChange = async (tz: string) => {
+    setTimezone(tz);
+    setSavingTz(true);
+    try {
+      await apiRequest(endpoints.preferences, {
+        method: 'PUT',
+        body: JSON.stringify({ timezone: tz }),
+      });
+    } catch {
+      notify.error('Could not save timezone', 'Your schedule times may use the server default.');
+    } finally {
+      setSavingTz(false);
+    }
+  };
 
   const onFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -123,8 +196,8 @@ export function Scheduled() {
       notify.error('Caption required', 'Add a caption for the post.');
       return;
     }
-    if (!publishAt) {
-      notify.error('Time required', 'Pick when the post should be published.');
+    if (!publishNow && !publishAt) {
+      notify.error('Time required', 'Pick when the post should be published, or choose Publish now.');
       return;
     }
     if (!imageBase64) {
@@ -135,11 +208,12 @@ export function Scheduled() {
     try {
       await apiRequest(endpoints.schedulePost, {
         method: 'POST',
-        body: JSON.stringify({ caption: caption.trim(), publishAt, imageBase64 }),
+        body: JSON.stringify({ caption: caption.trim(), publishAt, imageBase64, timezone, publishNow }),
       });
-      notify.success('Post scheduled', 'Your post will be published automatically.');
+      notify.success(publishNow ? 'Post published' : 'Post scheduled', publishNow ? 'Your post is being published now.' : 'Your post will be published automatically.');
       setCaption('');
       setPublishAt('');
+      setPublishNow(false);
       setImageBase64('');
       setImageName('');
       await fetchPosts();
@@ -172,7 +246,7 @@ export function Scheduled() {
 
   const startReschedule = (id: string, current?: string) => {
     setReschedulingId(id);
-    setRescheduleTime(current ? toLocalInput(current) : '');
+    setRescheduleTime(current ? toLocalInput(current, timezone) : '');
   };
 
   const submitReschedule = async (id: string, kind: 'post' | 'ad') => {
@@ -185,14 +259,14 @@ export function Scheduled() {
       if (kind === 'post') {
         await apiRequest(endpoints.reschedulePost(id), {
           method: 'POST',
-          body: JSON.stringify({ publishAt: new Date(rescheduleTime).toISOString() }),
+          body: JSON.stringify({ publishAt: rescheduleTime, timezone }),
         });
         notify.success('Rescheduled', 'Scheduled post time updated.');
         await fetchPosts();
       } else {
         await apiRequest(endpoints.rescheduleAd(id), {
           method: 'POST',
-          body: JSON.stringify({ schedule_time: new Date(rescheduleTime).toISOString() }),
+          body: JSON.stringify({ schedule_time: rescheduleTime, timezone }),
         });
         notify.success('Rescheduled', 'Scheduled ad time updated.');
         await fetchAds();
@@ -219,6 +293,32 @@ export function Scheduled() {
         <h1 className="text-2xl font-bold tracking-tight text-slate-900 dark:text-slate-50">Scheduled Publishing</h1>
         <p className="mt-1 text-sm text-slate-500">Schedule posts and ads to publish automatically at your chosen time.</p>
       </header>
+
+      <Card as="section" hoverable={false} padded={false} className="mb-6">
+        <div className="flex flex-wrap items-center justify-between gap-3 px-6 py-4">
+          <div className="flex items-center gap-2 text-sm text-slate-600 dark:text-slate-300">
+            <CalendarClockIcon className="h-4 w-4 text-indigo-600" aria-hidden="true" />
+            <span>Your timezone</span>
+          </div>
+          <div className="flex items-center gap-2">
+            <select
+              aria-label="Timezone"
+              value={timezone}
+              disabled={savingTz}
+              onChange={(e) => onTimezoneChange(e.target.value)}
+              className="rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 shadow-sm focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100"
+            >
+              {!COMMON_TIMEZONES.includes(timezone) && (
+                <option value={timezone}>{timezone}</option>
+              )}
+              {COMMON_TIMEZONES.map((tz) => (
+                <option key={tz} value={tz}>{tz}</option>
+              ))}
+            </select>
+            {savingTz && <span className="text-xs text-slate-400">Saving…</span>}
+          </div>
+        </div>
+      </Card>
 
       <Card as="section" hoverable={false} padded={false} className="mb-6">
         <button
@@ -254,8 +354,17 @@ export function Scheduled() {
                 label="Publish time"
                 type="datetime-local"
                 value={publishAt}
-                onChange={(e) => setPublishAt(e.target.value)} />
+                onChange={(e) => setPublishAt(e.target.value)}
+                disabled={publishNow} />
             </div>
+            <label className="flex items-center gap-2 text-sm text-slate-600 dark:text-slate-300">
+              <input
+                type="checkbox"
+                checked={publishNow}
+                onChange={(e) => setPublishNow(e.target.checked)}
+                className="h-4 w-4 rounded border-slate-300 text-indigo-600 focus:ring-indigo-500" />
+              Publish now (directly post instead of scheduling)
+            </label>
             <Textarea
               label="Caption"
               placeholder="Write the caption for your post..."
@@ -293,7 +402,7 @@ export function Scheduled() {
                     <p className="truncate text-sm font-medium text-slate-900 dark:text-slate-100">
                       {item.caption || 'Untitled post'}
                     </p>
-                    <p className="mt-0.5 text-xs text-slate-500">Publishes {formatDateTime(item.publishAt)}</p>
+                     <p className="mt-0.5 text-xs text-slate-500">Publishes {formatDateTime(item.publishAt, timezone)} ({timezone})</p>
                     {reschedulingId === item.id && (
                       <div className="mt-3 flex flex-wrap items-center gap-2">
                         <Input
@@ -339,11 +448,11 @@ export function Scheduled() {
                     <p className="truncate text-sm font-medium text-slate-900 dark:text-slate-100">
                       {item.name || 'Untitled ad'}
                     </p>
-                    <p className={cn('mt-0.5 text-xs', item.publishAt ? 'text-slate-500' : 'text-slate-400')}>
-                      {item.publishAt
-                        ? `Launches ${formatDateTime(item.publishAt)}`
-                        : item.status}
-                    </p>
+                     <p className={cn('mt-0.5 text-xs', item.publishAt ? 'text-slate-500' : 'text-slate-400')}>
+                       {item.publishAt
+                         ? `Launches ${formatDateTime(item.publishAt, timezone)} (${timezone})`
+                         : item.status}
+                     </p>
                     {reschedulingId === item.id && (
                       <div className="mt-3 flex flex-wrap items-center gap-2">
                         <Input

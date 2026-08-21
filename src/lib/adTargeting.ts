@@ -117,10 +117,11 @@ export function buildMetaTargeting(t: {
   if (Object.keys(geoLocations).length > 0) targeting.geo_locations = geoLocations
 
   const interests = normalizeInterests(t.interests || [], t.interestIds)
+  // Only resolved, real Meta interest IDs are ever sent. Fabricating a
+  // hardcoded interest (e.g. "Digital Marketing") would mis-target every
+  // campaign, so unresolvable interest names are omitted — never guessed.
   if (interests.length > 0) {
-    targeting.interests = {
-      '600313996292556': { name: 'Digital Marketing', id: '600313996292556' },
-    }
+    targeting.interests = interests
   }
 
   // Placements default to Facebook + Instagram feed.

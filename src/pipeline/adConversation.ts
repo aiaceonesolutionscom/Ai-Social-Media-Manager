@@ -9,6 +9,8 @@ import {
   createAdCampaign,
   updateAdCampaign,
   getAdCampaign,
+  claimAdCampaignForLaunch,
+  recoverStuckAdCampaigns,
   getUser,
   getPackage,
   setConversation,
@@ -126,11 +128,15 @@ export async function generateAndPreviewAd(
     }
 
     // Generate ad content and targeting in parallel
-    const [adContent, targeting, objective] = await Promise.all([
+    const [generatedContent, targeting, objective] = await Promise.all([
       generateAdContent(topic, intent),
       generateAdTargeting(topic, intent.audience, adData.location),
       suggestAdObjective(topic, intent.goal),
     ])
+    // P2-18 — the user's website is the source of truth for the landing URL.
+    // The LLM writer cannot know the business URL, so it must be injected here;
+    // without this the campaign was rejected at launch ("website URL is required").
+    const adContent = { ...generatedContent, linkUrl: adData.websiteUrl || generatedContent.linkUrl }
 
     // Generate image (or use existing post image)
     let imageUrl = ''
@@ -238,11 +244,24 @@ async function sendPreview(
 
 // Launch ad campaign on Meta. Called from conversation.ts when user approves.
 export async function launchAdCampaign(campaignId: string): Promise<void> {
+  // P2-21 — self-heal: any campaign stuck 'creating' from a crashed launch is
+  // reset to 'pending' so it can be launched (or retried) instead of being
+  // permanently wedged. Freshly-claimed rows are untouched.
+  try {
+    await recoverStuckAdCampaigns()
+  } catch (err) {
+    logger.warn({ error: (err as Error).message }, 'recoverStuckAdCampaigns failed during launch')
+  }
+  // P1-20 — claim the campaign atomically FIRST. The conditional update ensures
+  // only one of any concurrent launch attempts wins; the rest see 'creating'
+  // and return without creating a duplicate campaign on Meta.
+  const claimed = await claimAdCampaignForLaunch(campaignId)
   const campaign = await getAdCampaign(campaignId)
   if (!campaign) {
     throw new Error('Campaign not found')
   }
-  if (campaign.status === 'active' || campaign.status === 'paused' || campaign.status === 'stopped' || campaign.status === 'cancelled' || campaign.status === 'failed') {
+  if (!claimed) {
+    // Already being launched ('creating') or already in a terminal state.
     return
   }
 
@@ -297,7 +316,10 @@ export async function launchAdCampaign(campaignId: string): Promise<void> {
     await setConversation(phone, { kind: 'idle' })
     return
   }
-  const linkUrl = campaign.adContent.linkUrl || campaign.adContent.callToAction ? campaign.adContent.linkUrl : undefined
+  // P2-18 — the landing URL comes from the ad content; the confusing ternary
+  // `linkUrl || callToAction ? linkUrl : undefined` collapsed to just linkUrl
+  // and could drop the URL when callToAction was set but linkUrl empty.
+  const linkUrl = campaign.adContent.linkUrl || undefined
   if (!linkUrl) {
     await updateAdCampaign(campaign.id, { status: 'failed' })
     await sendText(phone, '❌ Failed to create ad campaign: a website URL is required. Please provide a website in the ad details.')
@@ -313,8 +335,6 @@ export async function launchAdCampaign(campaignId: string): Promise<void> {
   }
 
   await sendText(phone, '⏳ Creating your ad campaign on Meta...')
-  // Mark as creating so the scheduler won't double-launch.
-  await updateAdCampaign(campaign.id, { status: 'creating' })
 
   try {
     const t = campaign.targeting
@@ -345,6 +365,7 @@ export async function launchAdCampaign(campaignId: string): Promise<void> {
       startDate,
       endDate: campaign.endDate,
       targeting: metaTargeting,
+      pixelId: config.metaAds.pixelId || undefined,
     })
 
     // Meta confirmed creation + activation → only now mark DB active.
@@ -392,7 +413,7 @@ export async function applyAdCampaignAction(
     )
     return
   }
-  const userAdAccount = await getAccountByPlatform(campaign.phone, 'meta_ads')
+  const userAdAccount = await getAccountByPlatform(await resolveUserPhone(campaign.phone), 'meta_ads')
   const token = userAdAccount?.accessToken
   if (!token) throw new Error('Meta Ads account not connected')
   const metaStatus: Record<'pause' | 'resume', 'PAUSED' | 'ACTIVE'> = { pause: 'PAUSED', resume: 'ACTIVE' }

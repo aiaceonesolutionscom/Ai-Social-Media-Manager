@@ -5,6 +5,21 @@ import { notifyPayment } from '../lib/notifications.js'
 import { getGatewaySettings, verifyGatewayWebhook } from '../lib/gateway.js'
 import { logger } from '../lib/logger.js'
 
+/**
+ * Verifies that a completed gateway event charged the amount we recorded for this
+ * payment. The gateway charges in PKR: base = (amountCents/100) * pkrRate, plus the
+ * gateway MDR. We accept the webhook amount expressed in major units, minor units, or
+ * decimal PKR (the gateway may vary) as long as it matches the expected charge, and we
+ * reject events whose currency is not PKR.
+ */
+function gatewayAmountMatches(amount: unknown, expectedPkr: number, currency: string | undefined): boolean {
+  const n = Number(amount)
+  if (!Number.isFinite(n) || n <= 0) return false
+  if (currency && currency.toUpperCase() !== 'PKR') return false
+  const candidates = [expectedPkr, expectedPkr * 100, expectedPkr / 100]
+  return candidates.some((c) => Math.abs(n - c) <= Math.max(1, c * 0.001))
+}
+
 export async function registerGatewayRoutes(server: FastifyInstance): Promise<void> {
   server.post('/webhooks/gateway', async (req: any, reply: any) => {
     const signature = req.headers['x-rapidgateway-signature'] || req.headers['x-rg-signature'] || ''
@@ -62,6 +77,20 @@ export async function registerGatewayRoutes(server: FastifyInstance): Promise<vo
       if (!claimed) {
         logger.info({ merchantTransactionId, status: payment.status }, 'gateway webhook for finalized payment, skipping')
         return reply.send({ received: true })
+      }
+
+      // Never activate a package from an event that does not match the recorded charge.
+      const cfg = await getAllConfig()
+      const pkrRate = Number(cfg.payment_local_pkr_rate) || 0
+      const mdrPercent = payment.mdrPercent ?? 0
+      const basePkr = Math.round((payment.amountCents / 100) * pkrRate)
+      const expectedPkr = Math.round(basePkr * (1 + mdrPercent / 100))
+      if (pkrRate <= 0 || !gatewayAmountMatches(event.amount, expectedPkr, event.currency)) {
+        logger.warn(
+          { merchantTransactionId, phone: payment.phone, amount: event.amount, currency: event.currency, expectedPkr },
+          'gateway webhook amount/currency mismatch, rejecting completion',
+        )
+        return reply.status(400).send({ error: 'Amount or currency mismatch' })
       }
 
       const pkg = payment.packageId ? await getPackage(payment.packageId) : null

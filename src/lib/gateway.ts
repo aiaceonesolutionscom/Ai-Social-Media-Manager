@@ -89,23 +89,23 @@ export function verifyGatewayWebhook(input: GatewayWebhookInput): boolean {
   const { rawBody, timestamp, signature, webhookSecret } = input
   if (!signature || !webhookSecret) return false
 
-  // New scheme: HMAC-SHA256(timestamp + '.' + rawBody) using the webhook secret,
-  // uppercase hex, valid within a 5-minute window.
-  if (timestamp) {
-    const expected = crypto
-      .createHmac('sha256', webhookSecret)
-      .update(`${timestamp}.${rawBody}`)
-      .digest('hex')
-      .toUpperCase()
-    if (safeEqual(expected, signature)) {
-      const now = Math.floor(Date.now() / 1000)
-      return Math.abs(now - Number(timestamp)) <= 300
-    }
+  // P5-7 — replay protection: the signature MUST cover a timestamp and the body,
+  // and the timestamp MUST be within a 5-minute window. The legacy raw-body-only
+  // scheme is deprecated and no longer accepted because it is replayable.
+  const ts = Number(timestamp)
+  if (!timestamp || !Number.isFinite(ts)) {
+    return false
   }
-
-  // Legacy scheme: HMAC-SHA256(rawBody), hex (lowercase).
-  const legacy = crypto.createHmac('sha256', webhookSecret).update(rawBody).digest('hex')
-  return safeEqual(legacy, signature)
+  const expected = crypto
+    .createHmac('sha256', webhookSecret)
+    .update(`${timestamp}.${rawBody}`)
+    .digest('hex')
+    .toUpperCase()
+  if (!safeEqual(expected, signature)) {
+    return false
+  }
+  const now = Math.floor(Date.now() / 1000)
+  return Math.abs(now - ts) <= 300
 }
 
 function safeEqual(a: string, b: string): boolean {

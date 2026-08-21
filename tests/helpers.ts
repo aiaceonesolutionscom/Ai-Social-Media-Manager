@@ -37,7 +37,7 @@ export async function registerTestUser(opts: { tokens?: number; packageId?: stri
     packageId,
   })
   await connectAccount({ phone: PHONE, platform: 'instagram', accountId: '17841400000000000', accountName: 'Test IG', accessToken: 'mock-ig-token' })
-  await connectAccount({ phone: PHONE, platform: 'facebook', accountId: 'dev_fb_page', accountName: 'Test FB', accessToken: 'mock-fb-token' })
+  await connectAccount({ phone: PHONE, platform: 'facebook', accountId: 'dev_fb_page', accountName: 'Test FB', accessToken: 'dev_fb_token' })
 }
 
 export const IMAGE_BUFFER = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])

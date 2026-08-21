@@ -11,19 +11,28 @@ import {
   listAdCampaignsByPhone,
 } from '../store.js'
 import { normalizeScheduleTime } from '../pipeline/publish.js'
+import { resolveUserTimezone } from '../lib/timezone.js'
 import { logger } from '../lib/logger.js'
 import { config } from '../config.js'
 import type { AdContent, AdTargeting, AdConversationData } from '../types.js'
 import { validateBudget, validateScheduleDates } from '../pipeline/adConversation.js'
 import { buildMetaTargeting } from '../lib/adTargeting.js'
 
-function parseTargeting(audience: string): AdTargeting {
+// Targeting is never auto-guessed: the caller must supply explicit locations.
+// Age/gender default to neutral universal values (18-65, all genders) and are
+// shown back to the user; geographic targeting (which spends real money) is
+// always required.
+function parseTargeting(targeting: any, audience: string): AdTargeting {
   return {
-    ageMin: 18,
-    ageMax: 65,
-    genders: ['all'],
-    locations: ['US'],
-    interests: audience ? [audience] : [],
+    ageMin: typeof targeting?.ageMin === 'number' ? targeting.ageMin : 18,
+    ageMax: typeof targeting?.ageMax === 'number' ? targeting.ageMax : 65,
+    genders: Array.isArray(targeting?.genders) ? targeting.genders : ['all'],
+    locations: Array.isArray(targeting?.locations) ? targeting.locations : [],
+    interests: Array.isArray(targeting?.interests)
+      ? targeting.interests
+      : audience
+        ? [audience]
+        : [],
   }
 }
 
@@ -75,6 +84,7 @@ export async function registerAdSchedulerRoutes(server: FastifyInstance): Promis
     const {
       objective,
       audience,
+      targeting,
       budget,
       budgetType,
       currency,
@@ -85,6 +95,7 @@ export async function registerAdSchedulerRoutes(server: FastifyInstance): Promis
     } = req.body as {
       objective?: string
       audience?: string
+      targeting?: { ageMin?: number; ageMax?: number; genders?: string[]; locations?: string[]; interests?: string[] }
       budget?: number
       budgetType?: 'daily' | 'total'
       currency?: string
@@ -96,6 +107,12 @@ export async function registerAdSchedulerRoutes(server: FastifyInstance): Promis
 
     if (!objective) {
       return reply.status(400).send({ error: 'objective is required' })
+    }
+
+    // Geographic targeting is a hard requirement — Meta spends real money per
+    // impression, so the location is never invented.
+    if (!targeting || !Array.isArray(targeting.locations) || targeting.locations.length === 0) {
+      return reply.status(400).send({ error: 'targeting.locations is required — choose at least one country or city. Targeting is never auto-guessed.' })
     }
 
     const adData: AdConversationData = {
@@ -119,7 +136,7 @@ export async function registerAdSchedulerRoutes(server: FastifyInstance): Promis
       return reply.status(400).send({ error: 'A website URL is required to create the ad creative' })
     }
 
-    const publishAt = schedule_time ? await normalizeScheduleTime(schedule_time) : undefined
+    const publishAt = schedule_time ? await normalizeScheduleTime(schedule_time, await resolveUserTimezone(session.phone)) : undefined
     if (schedule_time && !publishAt) {
       return reply.status(400).send({ error: 'schedule_time must be a valid future time (e.g. ISO date, "in 2 hours", "tomorrow at 5pm", "15 August at 9am")' })
     }
@@ -130,7 +147,7 @@ export async function registerAdSchedulerRoutes(server: FastifyInstance): Promis
         name: typeof creative_data?.name === 'string' && creative_data.name ? creative_data.name : `${objective.replace('OUTCOME_', '')} - Ad Campaign`,
         objective,
         adContent: parseAdContent(creative_data),
-        targeting: parseTargeting(audience || ''),
+        targeting: parseTargeting(targeting, audience || ''),
         budgetCents: budgetCheck.budgetCents,
         budgetType: budgetCheck.budgetType as 'daily' | 'total',
         currency: budgetCheck.currency,
@@ -193,7 +210,7 @@ export async function registerAdSchedulerRoutes(server: FastifyInstance): Promis
 
     const patch: Partial<import('../types.js').AdCampaign> = {}
     if (schedule_time) {
-      const publishAt = await normalizeScheduleTime(schedule_time)
+      const publishAt = await normalizeScheduleTime(schedule_time, await resolveUserTimezone(session.phone))
       if (!publishAt) {
         return reply.status(400).send({ error: 'schedule_time must be a valid future time' })
       }

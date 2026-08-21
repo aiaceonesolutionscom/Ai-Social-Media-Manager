@@ -42,13 +42,16 @@ import { RequireAdmin } from './components/layout/RequireAdmin';
 import { RequireUser } from './components/RequireUser';
 import { ClerkSessionBridge } from './components/ClerkSessionBridge';
 
+const clerkEnabled =
+  import.meta.env.VITE_ENABLE_CLERK === 'true' && !!import.meta.env.VITE_CLERK_PUBLISHABLE_KEY;
+
 export function App() {
-  return (
+  const app = (
     <BrowserRouter>
       <AuthProvider>
         <UserAuthProvider>
           <ToastHost />
-          <ClerkSessionBridge />
+          {clerkEnabled && <ClerkSessionBridge />}
           <Routes>
             <Route path="/" element={<Landing />} />
             <Route path="/signup" element={<Signup />} />
@@ -93,4 +96,6 @@ export function App() {
       </AuthProvider>
     </BrowserRouter>
   );
+
+  return app;
 }

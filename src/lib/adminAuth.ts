@@ -55,6 +55,15 @@ export const ALL_PERMISSIONS: Array<{ section: string; actions: Array<{ key: str
     { key: 'settings.view', label: 'View settings' },
     { key: 'settings.update', label: 'Update settings' },
   ] },
+  { section: 'Admin Management', actions: [
+    { key: 'admins.view', label: 'View admin users' },
+    { key: 'admins.create', label: 'Create admin users' },
+    { key: 'admins.update', label: 'Update admin users' },
+    { key: 'admins.delete', label: 'Delete admin users' },
+  ] },
+  { section: 'Logs & Audit', actions: [
+    { key: 'logs.view', label: 'View logs, errors, and audit trail' },
+  ] },
 ]
 
 export function allPermissionKeys(): string[] {

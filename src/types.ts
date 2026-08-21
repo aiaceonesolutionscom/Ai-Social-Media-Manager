@@ -6,11 +6,13 @@ export type PostStage =
   | 'WRITTEN'
   | 'IMAGE'
   | 'CHECKED'
+  | 'IMAGE_FAILED'
   | 'AWAITING_APPROVAL'
   | 'APPROVED'
   | 'PREPARING_TO_PUBLISH'
   | 'PUBLISHING'
   | 'DONE'
+  | 'PARTIAL_SUCCESS'
   | 'CANCELLED'
   | 'FAILED'
 
@@ -37,7 +39,7 @@ export interface WrittenContent {
   cta: string
   emojis: string
   hashtags: string
-  seoKeywords: string[]
+  seoKeywords?: string[]
 }
 
 export interface PlatformContent {
@@ -59,6 +61,16 @@ export interface StageEvent {
   at: string
   note?: string
 }
+
+export interface PlatformPublishState {
+  status: 'published' | 'failed' | 'skipped'
+  mediaId?: string
+  permalink?: string
+  error?: string
+  publishedAt?: string
+}
+
+export type PublishPlatform = 'instagram' | 'facebook'
 
 export interface Post {
   id: string
@@ -86,7 +98,8 @@ export interface Post {
   tokensChargedAction?: string
   refundedAt?: string
   skipBranding?: boolean
-  platforms?: ('instagram' | 'facebook')[]
+  platforms?: PublishPlatform[]
+  platformStatuses?: Partial<Record<PublishPlatform, PlatformPublishState>>
 }
 
 export type MessageRole = 'user' | 'bot'
@@ -141,6 +154,7 @@ export type ConversationState =
   | { kind: 'ad_gathering'; postId: string; step: string; data: Record<string, unknown>; adData?: AdConversationData }
   | { kind: 'ad_preview'; postId: string; adData?: AdConversationData }
   | { kind: 'awaiting_branding'; postId: string }
+  | { kind: 'image_retry'; postId: string }
 
 export type PendingConversation = ConversationState
 
@@ -150,10 +164,12 @@ export type AgentAction =
   | 'generate_post'
   | 'edit_request'
   | 'approve'
+  | 'publish_now'
   | 'regenerate'
   | 'cancel_publish'
   | 'new_post'
   | 'create_ad'
+  | 'manual_ad'
   | 'continue_ad'
   | 'edit_ad'
   | 'launch_ad'
@@ -162,6 +178,8 @@ export type AgentAction =
   | 'resume_ad'
   | 'stop_ad'
   | 'use_post_as_ad'
+  | 'reuse_post'
+  | 'reuse_ad'
   | 'add_platform'
   | 'switch_platform'
   | 'schedule_post'
@@ -177,6 +195,12 @@ export interface AgentDecision {
   editRequest?: string
   scheduleAt?: string
   brandingOn?: boolean
+  /**
+   * Only ever true when the user EXPLICITLY says to publish/send the post right
+   * now (e.g. "publish now", "post it", "send it"). A bare "approve" must NOT
+   * set this — the assistant must then ask "publish now or schedule?".
+   */
+  publishNow?: boolean
   adData?: AdConversationData
   platform?: 'instagram' | 'facebook' | 'both'
   /**
@@ -203,6 +227,7 @@ export interface UserPreferences {
   audience?: string
   brandVoice?: string
   brandingEnabled?: boolean
+  timezone?: string
   [key: string]: unknown
 }
 
@@ -251,7 +276,7 @@ export interface User {
   role: 'user' | 'admin'
   active: number
   packageId: string
-  packageStatus: 'none' | 'active' | 'expired' | 'ended'
+  packageStatus: 'none' | 'active' | 'paused' | 'expired' | 'ended'
   packageStartedAt: string
   packageExpiresAt: string
   packageEndedAt: string
@@ -299,6 +324,7 @@ export interface SocialAccount {
 export interface AdminConfig {
   key: string
   value: string
+  isSensitive: boolean
   updatedAt: string
 }
 
@@ -314,9 +340,10 @@ export interface Payment {
   mdrPercent: number
   taxAmount: number
   mdrAmount: number
+  currency: string
   type: PaymentType
   stripeSessionId: string
-  status: 'pending' | 'completed' | 'failed' | 'refunded'
+  status: 'pending' | 'processing' | 'completed' | 'failed' | 'refunded'
   createdAt: string
 }
 

@@ -4,7 +4,9 @@ import ReactDOM from "react-dom/client";
 import { ClerkProvider } from "@clerk/clerk-react";
 import { App } from "./App";
 
-const clerkPublishableKey = (import.meta as { env?: { VITE_CLERK_PUBLISHABLE_KEY?: string } }).env?.VITE_CLERK_PUBLISHABLE_KEY || "";
+const clerkEnv = (import.meta as { env?: Record<string, string | undefined> }).env || {};
+const clerkPublishableKey = clerkEnv.VITE_CLERK_PUBLISHABLE_KEY || "";
+const clerkEnabled = clerkEnv.VITE_ENABLE_CLERK === "true" && !!clerkPublishableKey;
 
 if (!clerkPublishableKey) {
   console.warn(
@@ -16,9 +18,13 @@ const rootEl = document.getElementById("root");
 if (rootEl) {
   ReactDOM.createRoot(rootEl).render(
     <React.StrictMode>
-      <ClerkProvider publishableKey={clerkPublishableKey}>
+      {clerkEnabled ? (
+        <ClerkProvider publishableKey={clerkPublishableKey}>
+          <App />
+        </ClerkProvider>
+      ) : (
         <App />
-      </ClerkProvider>
-    </React.StrictMode>
+      )}
+    </React.StrictMode>,
   );
 }
